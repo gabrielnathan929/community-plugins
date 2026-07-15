@@ -50,3 +50,14 @@ description = "A plugin that provides a widget for displaying system update info
 deprecated = false
 min_noctalia = "5.0.0"
 tags = ["system", "arch"]
+
+[[plugin]]
+id = "lucasoe/proton-pass"
+name = "Proton Pass"
+version = "0.1.0"
+author = "LucasOe"
+license = "MIT"
+icon = "lock"
+description = "Access Proton Pass from the launcher"
+min_noctalia = "5.0.0"
+tags = ["launcher"]
