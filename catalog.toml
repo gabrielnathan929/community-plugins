@@ -95,3 +95,15 @@ icon = "lock"
 description = "Orientation lock for 2‑in‑1 devices using iio-hyprland and similar."
 min_noctalia = "5.0.0"
 tags = ["hyprland", "sway", "desktop", "utility"]
+
+[[plugin]]
+id = "radimous/prismlauncher-instances"
+name = "PrismLauncher Instances"
+version = "1.0.0"
+author = "radimous"
+license = "MIT"
+icon = "nut"
+description = "A launcher provider that adds PrismLauncher instances to the noctalia launcher."
+deprecated = false
+min_noctalia = "5.0.0"
+tags = ["gaming", "launcher"]
