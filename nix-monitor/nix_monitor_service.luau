@@ -53,7 +53,7 @@ local nixosGenerationsCmd = "nixos-rebuild list-generations | tail -n +2 | wc -l
 local nixosCurrentGenCmd = "nixos-rebuild list-generations | grep True | awk '{print $1}'"
 local hmGenerationsCmd = "home-manager generations | wc -l"
 local hmCurrentGenCmd = "home-manager generations | grep '(current)' | awk '{print $5}'"
-local storeSizeCmd = "du -s --block-size=1GiB /nix/store | awk '{print $1 \" GiB\"}'"
+local storeSizeCmd = "du -s --block-size=1 /nix/store | awk '{printf \"%.2f GiB\", $1/1073741824}'"
 local closureSizeCmd = "nix path-info --closure-size --human-readable /run/current-system | awk '{print $2, $3}'"
 
 -- State inits
