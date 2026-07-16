@@ -1,0 +1,18 @@
+{
+  "title": "MyAnimeList",
+  "search_placeholder": "Search anime or manga...",
+  "search_button": "Search",
+  "filter_anime": "Anime",
+  "filter_manga": "Manga",
+  "filter_both": "Both",
+  "prev_page": "Prev",
+  "next_page": "Next",
+  "loading": "Loading...",
+  "no_results": "No results",
+  "empty_state": "Use the search box",
+  "min_chars": "Type at least 2 characters.",
+  "request_failed": "Request failed (HTTP {status})",
+  "empty_response": "Empty response from AniList.",
+  "parse_error": "Could not parse AniList response.",
+  "search_error": "No results for '{query}'."
+}

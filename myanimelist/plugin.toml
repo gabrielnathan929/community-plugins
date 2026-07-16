@@ -1,0 +1,24 @@
+id = "gabrielnathan929/myanimelist"
+name = "MyAnimeList"
+version = "0.2.0"
+plugin_api = 3
+author = "gabrielnathan929"
+license = "MIT"
+dependencies = []
+tags = ["anime", "manga", "mal", "launcher", "panel"]
+icon = "star"
+description = "Search anime & manga via AniList and open results on MyAnimeList."
+
+[[panel]]
+id = "browser"
+entry = "panel.luau"
+width = 980
+height = 700
+placement = "attached"
+position = "auto"
+
+[[launcher_provider]]
+id = "launcher"
+entry = "launcher.luau"
+prefix = "myanimelist"
+include_in_global_search = true

@@ -173,3 +173,14 @@ icon = "device-laptop"
 description = "Toggles battery conservation mode via the ideapad_acpi driver, on Lenovo IdeaPad and Legion laptops."
 plugin_api = 3
 tags = ["hardware", "shortcut", "system"]
+
+[[plugin]]
+id = "gabrielnathan929/myanimelist"
+name = "MyAnimeList"
+version = "0.2.0"
+author = "gabrielnathan929"
+license = "MIT"
+icon = "star"
+description = "Search anime & manga via AniList and open results on MyAnimeList."
+plugin_api = 3
+tags = ["anime", "manga", "mal", "launcher", "panel"]
