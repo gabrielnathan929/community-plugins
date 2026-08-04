@@ -13,7 +13,7 @@ NixOS generations, store size, closure size, and update status from the bar.
 ## Requirements
 
 This plugin is intended for NixOS. It uses `nix`, `nixos-version`,
-`nixos-rebuild`, and `git`, plus the standard commands `du`, `cat`, `awk`,
+`nixos-rebuild`, `nix-store`, and `git`, plus the standard commands `du`, `cat`, `read`, `echo`, `awk`,
 `grep`, `tail`, `wc`, `kill`, and `pkill`. Home Manager generation information
 is shown when `home-manager` is available.
 
@@ -29,8 +29,8 @@ Open the panel directly with:
 noctalia msg panel-toggle avivbintangaringga/nix-monitor:panel
 ```
 
-Set `update_command` before using **Update**. **Clean** runs the configured
-cleanup command, which defaults to `nix-collect-garbage -d`. Both commands open
+Set `update_command` before using **Update**. **Optimize** runs the configured command `nix-store --optimise -vv`. **Clean** runs the configured
+cleanup command, which defaults to `nix-collect-garbage -d`. All commands open
 in a terminal so you can review their output.
 
 ## Settings
@@ -47,7 +47,8 @@ Update behavior:
 | `show_update_available_notification` | `true` | Notifies when a newer revision is available. |
 | `branch` | `nixos-unstable` | Nixpkgs branch compared by the service. |
 | `update_command` | *(empty)* | Command launched by the panel's **Update** button. |
-| `clean_command` | `nix-collect-garbage -d` | Command launched by **Clean**. |
+| `optimize_command` | `nix-store --optimize -vv` | Command launched by the panel's **Optimize** button. |
+| `clean_command` | `nix-collect-garbage -d` | Command launched by the panel's **Clean** button. |
 | `close_on_enter` | `true` | Keeps the command terminal open until Enter is pressed. |
 
 Widget appearance:

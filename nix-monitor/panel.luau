@@ -119,6 +119,19 @@ local function render()
 		end
 	end
 
+	if not cfg("hide_optimize_button") then
+		table.insert(
+			buttons,
+			ui.button({
+				text = tr("panel.optimize"),
+				glyph = "database-cog",
+				flexGrow = 1,
+				variant = "primary",
+				onClick = "onOptimizeClicked",
+			})
+		)
+	end
+
 	if not cfg("hide_clean_button") then
 		table.insert(
 			buttons,
@@ -250,13 +263,7 @@ function onUpdateClicked()
 		noctalia.notifyError(tr("notification.update_command_is_empty"))
 		return
 	end
-
-	if cfg("close_on_enter") then
-		command = `{command} && echo && read -p "{tr("terminal.press_enter_to_exit")}"`
-	end
-
-	panel.close()
-	noctalia.runInTerminal(command)
+	runCommandInTerminal(command)
 end
 
 function onCleanClicked()
@@ -265,11 +272,24 @@ function onCleanClicked()
 		noctalia.notifyError(tr("notification.clean_command_is_empty"))
 		return
 	end
+	runCommandInTerminal(command)
+end
 
+function onOptimizeClicked()
+	local command = cfg("optimize_command")
+	if command == "" then
+		noctalia.notifyError(tr("notification.optimize_command_is_empty"))
+		return
+	end
+	runCommandInTerminal(command)
+end
+
+function runCommandInTerminal(command)
 	if cfg("close_on_enter") then
 		command = `{command} && echo && read -p "{tr("terminal.press_enter_to_exit")}"`
 	end
 
+	command = `{command} || (echo && read -p "{tr("terminal.command_exits_non_zero")}")`
 	panel.close()
 	noctalia.runInTerminal(command)
 end

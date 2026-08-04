@@ -23,7 +23,8 @@ end
 
 function killWithPidFile(file)
 	if noctalia.fileExists(file) then
-		local pid = noctalia.string.trim(noctalia.readFile(file))
+		local content = noctalia.readFile(file) or ""
+		local pid = noctalia.string.trim(content)
 
 		if type(pid) == "string" and pid ~= "" then
 			noctalia.runAsync(`pkill -9 -P {pid} && kill -9 {pid}`)
@@ -38,7 +39,7 @@ local updateCheckInterval = cfg("update_check_interval")
 local updateCheckDurationThreshold = cfg("update_check_duration_threshold")
 local systemStatsCheckInterval = cfg("system_stats_check_interval")
 local systemStatsCheckDurationThreshold = cfg("system_stats_check_duration_threshold")
-local stateDir = "/tmp/nix-monitor"
+local stateDir = noctalia.pluginDataDir() or "/tmp/nix-monitor"
 local remoteHashFile = stateDir .. "/remoteHash"
 local storeSizeFile = stateDir .. "/storeSize"
 local closureSizeFile = stateDir .. "/closureSize"
@@ -67,6 +68,7 @@ setState("isRemoteCheckRunning", false)
 setState("isUpdateAvailable", false)
 setState("lastGenerationsCheckTime", 0)
 setState("isSystemStatsCheckRunning", false)
+setState("systemStatsCheckHasBeenPerformed", false)
 setState("lastSystemStatsCheckTime", os.time())
 setState("lastSystemStatsCheckRunTime", os.time())
 setState("hasHomeManager", noctalia.commandExists("home-manager"))
@@ -95,7 +97,7 @@ end
 -- Currently it is writing to a file because when I use the runAsync with
 -- the callback, it is timed out
 function checkRemoteHash(delay: number?)
-	local delay = delay or 0
+	local _delay = delay or 0
 
 	if getState("isRemoteCheckRunning") then
 		return
@@ -109,12 +111,13 @@ function checkRemoteHash(delay: number?)
 	end
 
 	noctalia.writeFile(remoteHashFile, "")
-	noctalia.runAsync(`sleep {delay} && {remoteHashCmd} > {remoteHashFile} & echo $! > {remotePidFile}`)
+	noctalia.runAsync(`sleep {_delay} && {remoteHashCmd} > {remoteHashFile} & echo $! > {remotePidFile}`)
 end
 
 -- Check if the remoteHash check command is finished by reading the file
 function checkRemoteStatus()
-	local remoteHash = noctalia.string.trim(noctalia.readFile(remoteHashFile))
+	local remoteHashFileContent = noctalia.readFile(remoteHashFile) or ""
+	local remoteHash = noctalia.string.trim(remoteHashFileContent)
 
 	if type(remoteHash) == "string" and remoteHash ~= "" then
 		setState("isRemoteCheckRunning", false)
@@ -165,11 +168,22 @@ function checkGenerations()
 end
 
 -- System stats check
-function checkSystemStats()
+function checkSystemStats(force)
 	if getState("isSystemStatsCheckRunning") then
 		return
 	end
 
+	if cfg("system_stats_check_mode") == "off" then
+		return
+	end
+
+	if cfg("system_stats_check_mode") == "on_start" and getState("systemStatsCheckHasBeenPerformed") and not force then
+		return
+	end
+
+	setState("storeSize", "•••")
+	setState("closureSize", "•••")
+	setState("systemStatsCheckHasBeenPerformed", true)
 	setState("isSystemStatsCheckRunning", true)
 	setState("lastSystemStatsCheckRunTime", os.time())
 
@@ -179,8 +193,10 @@ function checkSystemStats()
 end
 
 function checkSystemStatsFile()
-	local storeSize = noctalia.string.trim(noctalia.readFile(storeSizeFile))
-	local closureSize = noctalia.string.trim(noctalia.readFile(closureSizeFile))
+	local storeSizeFileContent = noctalia.readFile(storeSizeFile) or ""
+	local storeSize = noctalia.string.trim(storeSizeFileContent)
+	local closureSizeFileContent = noctalia.readFile(closureSizeFile) or ""
+	local closureSize = noctalia.string.trim(closureSizeFileContent)
 
 	if typeof(storeSize) == "string" and storeSize ~= "" then
 		setState("storeSize", storeSize)
@@ -212,7 +228,12 @@ end
 -- Init
 checkLocalHash()
 checkRemoteHash(10)
-checkSystemStats()
+if cfg("system_stats_check_mode") ~= "off" then
+	checkSystemStats()
+else
+	setState("storeSize", "n/a")
+	setState("closureSize", "n/a")
+end
 
 -- Command watcher
 watchState("command", function(command)
@@ -221,7 +242,7 @@ watchState("command", function(command)
 		cancelRemoteCheck()
 		checkRemoteHash()
 		checkGenerations()
-		checkSystemStats()
+		checkSystemStats(true)
 	end
 
 	if command == "cancel" then

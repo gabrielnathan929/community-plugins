@@ -1,12 +1,12 @@
 id              = "avivbintangaringga/nix-monitor"
 name            = "Nix Monitor"
-version         = "1.1.1"
-plugin_api    = 3
+version         = "1.3.0"
+plugin_api      = 3
 icon            = "package"
 author          = "avivbintangaringga"
 description     = "Nixpkgs update monitor"
 tags            = [ "nixos", "utility" ]
-dependencies    = [ "nix", "nixos-version", "nixos-rebuild", "git", "du", "cat", "awk", "grep", "tail", "wc", "kill", "pkill" ]
+dependencies    = [ "nix", "nixos-version", "nixos-rebuild", "nix-store", "git", "du", "cat", "echo", "read", "awk", "grep", "tail", "wc", "kill", "pkill" ]
 license         = "MIT"
 
 [[widget]]
@@ -129,11 +129,23 @@ min             = 1
 max             = 30
 
 [[setting]]
+key             = "system_stats_check_mode"
+type            = "select"
+label_key       = "setting.system_stats_check_mode.label"
+description_key = "setting.system_stats_check_mode.description"
+options         = [
+    { value = "off", label_key="setting.option.system_stats_check_mode.off" },
+    { value = "on_interval", label_key="setting.option.system_stats_check_mode.on_interval" },
+    { value = "on_start", label_key="setting.option.system_stats_check_mode.on_start" },
+]
+default         = "on_interval"
+
+[[setting]]
 key             = "system_stats_check_interval"
 type            = "int"
 label_key       = "setting.system_stats_check_interval.label"
 description_key = "setting.system_stats_check_interval.description"
-default         = 10
+default         = 60
 min             = 5
 
 [[setting]]
@@ -141,9 +153,8 @@ key             = "system_stats_check_duration_threshold"
 type            = "int"
 label_key       = "setting.system_stats_check_duration_threshold.label"
 description_key = "setting.system_stats_check_duration_threshold.description"
-default         = 5
+default         = 15
 min             = 1
-max             = 30
 
 [[setting]]
 key             = "panel_card_color"
@@ -181,6 +192,13 @@ description_key = "setting.update_command.description"
 default         = ""
 
 [[setting]]
+key             = "optimize_command"
+type            = "string"
+label_key       = "setting.optimize_command.label"
+description_key = "setting.optimize_command.description"
+default         = "nix-store --optimise -vv"
+
+[[setting]]
 key             = "clean_command"
 type            = "string"
 label_key       = "setting.clean_command.label"
@@ -192,6 +210,13 @@ key             = "hide_update_button"
 type            = "bool"
 label_key       = "setting.hide_update_button.label"
 description_key = "setting.hide_update_button.description"
+default         = false
+
+[[setting]]
+key             = "hide_optimize_button"
+type            = "bool"
+label_key       = "setting.hide_optimize_button.label"
+description_key = "setting.hide_optimize_button.description"
 default         = false
 
 [[setting]]
