@@ -1,0 +1,29 @@
+{
+  "title": "Hamra Control",
+  "menu": {
+    "apps": {
+      "label": "Aplicativos",
+      "sub": "Toggles hamra.programs"
+    },
+    "install": {
+      "label": "Instalar",
+      "sub": "Flathub e web apps"
+    },
+    "remove": {
+      "label": "Remover",
+      "sub": "Flatpaks e web apps"
+    },
+    "update": {
+      "label": "Atualizar",
+      "sub": "flake update e rebuild"
+    },
+    "keys": {
+      "label": "Chaves",
+      "sub": "SSH e GPG"
+    },
+    "system": {
+      "label": "Sistema",
+      "sub": "Info, GC, gerações, rollback"
+    }
+  }
+}

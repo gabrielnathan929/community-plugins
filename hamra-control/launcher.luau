@@ -1,0 +1,69 @@
+--!nonstrict
+
+local PANEL_ID = "gabrielnathan929/hamra-control:main"
+
+local MENU = {
+  { id = "apps", label = "Aplicativos", glyph = "app-window", sub = "Toggles hamra.programs" },
+  { id = "install", label = "Instalar", glyph = "download", sub = "Flathub e web apps" },
+  { id = "remove", label = "Remover", glyph = "trash", sub = "Flatpaks e web apps" },
+  { id = "update", label = "Atualizar", glyph = "refresh", sub = "flake update e rebuild" },
+  { id = "keys", label = "Chaves", glyph = "key", sub = "SSH e GPG" },
+  { id = "system", label = "Sistema", glyph = "settings", sub = "Info, GC, gerações, rollback" },
+}
+
+local function trim(s)
+  return noctalia.string.trim(s or "")
+end
+
+function onQuery(query)
+  local text = trim(query)
+  local rows = {}
+
+  if text == "" then
+    for _, entry in ipairs(MENU) do
+      rows[#rows + 1] = {
+        id = "open:" .. entry.id,
+        title = entry.label,
+        subtitle = entry.sub,
+        glyph = entry.glyph,
+      }
+    end
+  else
+    for _, entry in ipairs(MENU) do
+      local score = noctalia.fuzzyScore(text, entry.label)
+      if score ~= nil then
+        rows[#rows + 1] = {
+          id = "open:" .. entry.id,
+          title = entry.label,
+          subtitle = entry.sub,
+          glyph = entry.glyph,
+        }
+      end
+    end
+    if #rows == 0 then
+      rows[#rows + 1] = {
+        id = "search-flathub:" .. text,
+        title = "Buscar '" .. text .. "' no Flathub",
+        subtitle = "Abre Hamra Control › Instalar",
+        glyph = "search",
+      }
+    end
+  end
+
+  launcher.setResults(query, rows)
+end
+
+function onActivate(id)
+  local viewId = id:match("^open:(.+)$")
+  if viewId ~= nil then
+    noctalia.state.set("hamra_view", viewId)
+    noctalia.togglePanel(PANEL_ID)
+    return
+  end
+
+  local q = id:match("^search%-flathub:(.+)$")
+  if q ~= nil then
+    noctalia.state.set("hamra_install_query", trim(q))
+    noctalia.togglePanel(PANEL_ID)
+  end
+end

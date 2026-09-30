@@ -1082,9 +1082,24 @@ tags = ["hyprland"]
 id = "gabrielnathan929/myanimelist"
 name = "MyAnimeList"
 version = "0.2.0"
+updated_at = 1784409394
+added_at = 1784409394
 author = "gabrielnathan929"
 license = "MIT"
 icon = "star"
 description = "Search anime & manga via AniList and open results on MyAnimeList."
 plugin_api = 3
 tags = ["anime", "manga", "mal", "launcher", "panel"]
+
+[[plugin]]
+id = "gabrielnathan929/hamra-control"
+name = "Hamra Control"
+version = "0.1.0"
+updated_at = 1790790289
+added_at = 1790790289
+author = "gabrielnathan929"
+license = "MIT"
+icon = "settings"
+description = "Control center for Hamra (NixOS): app toggles, SSH/GPG keys, install/remove apps, update and system tasks."
+plugin_api = 3
+tags = ["nixos", "system", "panel", "launcher"]

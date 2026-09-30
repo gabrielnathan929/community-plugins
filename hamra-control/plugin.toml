@@ -1,0 +1,24 @@
+id = "gabrielnathan929/hamra-control"
+name = "Hamra Control"
+version = "0.1.0"
+plugin_api = 3
+author = "gabrielnathan929"
+license = "MIT"
+icon = "settings"
+description = "Control center for Hamra (NixOS): app toggles, SSH/GPG keys, install/remove apps, update and system tasks."
+dependencies = []
+tags = ["nixos", "system", "panel", "launcher"]
+
+[[panel]]
+id = "main"
+entry = "main.luau"
+width = 780
+height = 640
+placement = "attached"
+position = "auto"
+
+[[launcher_provider]]
+id = "menu"
+entry = "launcher.luau"
+prefix = "hamra"
+include_in_global_search = false
