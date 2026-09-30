@@ -3,12 +3,12 @@
 local PANEL_ID = "gabrielnathan929/hamra-control:main"
 
 local MENU = {
-  { id = "apps", label = "Aplicativos", glyph = "app-window", sub = "Toggles hamra.programs" },
-  { id = "install", label = "Instalar", glyph = "download", sub = "Flathub e web apps" },
-  { id = "remove", label = "Remover", glyph = "trash", sub = "Flatpaks e web apps" },
+  { id = "apps", label = "Aplicativos", glyph = "app-window", sub = "Toggles do hamra.programs" },
+  { id = "install", label = "Instalar", glyph = "download", sub = "Flatpak, nix e web apps" },
+  { id = "remove", label = "Remover", glyph = "trash", sub = "Flatpak, nix e web apps" },
   { id = "update", label = "Atualizar", glyph = "refresh", sub = "flake update e rebuild" },
   { id = "keys", label = "Chaves", glyph = "key", sub = "SSH e GPG" },
-  { id = "system", label = "Sistema", glyph = "settings", sub = "Info, GC, gerações, rollback" },
+  { id = "system", label = "Sistema", glyph = "settings", sub = "Info, gerações, GC, rollback" },
 }
 
 local function trim(s)
@@ -44,8 +44,14 @@ function onQuery(query)
       rows[#rows + 1] = {
         id = "search-flathub:" .. text,
         title = "Buscar '" .. text .. "' no Flathub",
-        subtitle = "Abre Hamra Control › Instalar",
-        glyph = "search",
+        subtitle = "Abre Hamra Control › Instalar › Flatpak",
+        glyph = "box",
+      }
+      rows[#rows + 1] = {
+        id = "search-nix:" .. text,
+        title = "Buscar '" .. text .. "' no nixpkgs",
+        subtitle = "Abre Hamra Control › Instalar › Nix",
+        glyph = "package",
       }
     end
   end
@@ -64,6 +70,14 @@ function onActivate(id)
   local q = id:match("^search%-flathub:(.+)$")
   if q ~= nil then
     noctalia.state.set("hamra_install_query", trim(q))
+    noctalia.togglePanel(PANEL_ID)
+    return
+  end
+
+  local n = id:match("^search%-nix:(.+)$")
+  if n ~= nil then
+    noctalia.state.set("hamra_install_tab", "nix")
+    noctalia.state.set("hamra_install_query", trim(n))
     noctalia.togglePanel(PANEL_ID)
   end
 end

@@ -3,15 +3,15 @@
   "menu": {
     "apps": {
       "label": "Aplicativos",
-      "sub": "Toggles hamra.programs"
+      "sub": "Toggles do hamra.programs"
     },
     "install": {
       "label": "Instalar",
-      "sub": "Flathub e web apps"
+      "sub": "Flatpak, nix e web apps"
     },
     "remove": {
       "label": "Remover",
-      "sub": "Flatpaks e web apps"
+      "sub": "Flatpak, nix e web apps"
     },
     "update": {
       "label": "Atualizar",
@@ -23,7 +23,7 @@
     },
     "system": {
       "label": "Sistema",
-      "sub": "Info, GC, gerações, rollback"
+      "sub": "Info, gerações, GC, rollback"
     }
   }
 }

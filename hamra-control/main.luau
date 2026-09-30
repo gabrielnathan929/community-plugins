@@ -1,5 +1,12 @@
 --!nonstrict
 
+-- Hamra Control — painel de controle do Hamra (NixOS) dentro do Noctalia.
+--
+-- Home: menu em grade com as seis áreas do painel. Instalar e Remover cobrem
+-- Flatpak, pacotes nix (nix profile) e web apps, sempre com o painel de
+-- preview lateral no estilo do antigo `fzf --preview 'flatpak remote-info'`.
+-- O delta dos toggles vai para hosts/<host>/configuration.nix.
+
 local home = noctalia.getenv("HOME") or "~"
 
 local repo = noctalia.getenv("HAMRA_REPO")
@@ -30,6 +37,8 @@ end)
 
 local editorExec = noctalia.getenv("EDITOR")
 if editorExec == nil or editorExec == "" then editorExec = "nvim" end
+
+-- ── helpers ─────────────────────────────────────────────────────────────────
 
 local function shq(s)
   return "'" .. tostring(s):gsub("'", "'\\''") .. "'"
@@ -67,15 +76,21 @@ local function notifyError(text)
   noctalia.notifyError("Hamra Control", text)
 end
 
+-- declarações adiantadas (usadas por funções definidas antes delas)
+local render
+local openView
+local selectItem
+local selectByKey
+
 local view = "home"
 
 local MENU = {
-  { id = "apps", label = "Aplicativos", glyph = "app-window", sub = "Toggles hamra.programs" },
-  { id = "install", label = "Instalar", glyph = "download", sub = "Flathub e web apps" },
-  { id = "remove", label = "Remover", glyph = "trash", sub = "Flatpaks e web apps" },
+  { id = "apps", label = "Aplicativos", glyph = "app-window", sub = "Toggles do hamra.programs" },
+  { id = "install", label = "Instalar", glyph = "download", sub = "Flatpak, nix e web apps" },
+  { id = "remove", label = "Remover", glyph = "trash", sub = "Flatpak, nix e web apps" },
   { id = "update", label = "Atualizar", glyph = "refresh", sub = "flake update e rebuild" },
   { id = "keys", label = "Chaves", glyph = "key", sub = "SSH e GPG" },
-  { id = "system", label = "Sistema", glyph = "settings", sub = "Info, GC, gerações, rollback" },
+  { id = "system", label = "Sistema", glyph = "settings", sub = "Info, gerações, GC, rollback" },
 }
 
 local function runInTerminal(cmd)
@@ -85,6 +100,69 @@ local function runInTerminal(cmd)
   end
   return true
 end
+
+-- ── shared UI ───────────────────────────────────────────────────────────────
+
+local function header(title, actions)
+  local children = {
+    ui.button({ glyph = "arrow-left", variant = "ghost", tooltip = "Voltar", onClick = "onBack" }),
+    ui.label({ text = title, fontSize = 16, fontWeight = "bold", flexGrow = 1, maxLines = 1 }),
+  }
+  for _, a in ipairs(actions or {}) do
+    table.insert(children, a)
+  end
+  table.insert(children, ui.button({ glyph = "close", variant = "ghost", tooltip = "Fechar", onClick = function() panel.close() end }))
+  return ui.row({ align = "center", gap = 8 }, children)
+end
+
+-- Barra de abas: items = { { id, label, glyph } }
+local function tabsBar(items, activeId, onPick)
+  local children = {}
+  for _, it in ipairs(items) do
+    local active = it.id == activeId
+    table.insert(children, ui.button({
+      key = "tab-" .. it.id,
+      text = it.label,
+      glyph = it.glyph,
+      variant = active and "primary" or "outline",
+      selected = active,
+      flexGrow = 1,
+      height = 34,
+      onClick = function() onPick(it.id) end,
+    }))
+  end
+  return ui.row({ gap = 8, align = "center" }, children)
+end
+
+-- Lista à esquerda + preview à direita (o preview do antigo fzf/gum).
+local function splitPane(listChildren, previewChildren, previewWidth)
+  return ui.row({ flexGrow = 1, gap = 12, align = "stretch" }, {
+    ui.scroll({ flexGrow = 1, gap = 6 }, listChildren),
+    ui.column({
+      width = previewWidth or 264,
+      gap = 8,
+      padding = 14,
+      paddingV = 12,
+      fill = "surface",
+      radius = 10,
+      border = "outline",
+      borderWidth = 1,
+    }, previewChildren),
+  })
+end
+
+local function hint(text)
+  return ui.label({ text = text, fontSize = 10, color = "on_surface_variant", maxLines = 2 })
+end
+
+local function statusLine(text)
+  if text == nil or text == "" then
+    return ui.label({ text = " ", fontSize = 10, color = "on_surface_variant" })
+  end
+  return ui.label({ text = text, fontSize = 10, color = "on_surface_variant", maxLines = 3 })
+end
+
+-- ── Aplicativos (toggles do flake) ──────────────────────────────────────────
 
 local appsLoaded = false
 local appsLoading = false
@@ -144,7 +222,7 @@ local function loadApps()
     tiers = newTiers
     appsLoaded = true
     render()
-  end)
+  end, 60000)
 end
 
 local function setToggleInConfig(key, want)
@@ -237,18 +315,6 @@ function onRebuildSwitch()
   render()
 end
 
-local function header(title, actions)
-  local children = {
-    ui.button({ glyph = "arrow-left", variant = "ghost", tooltip = "Voltar", onClick = "onBack" }),
-    ui.label({ text = title, fontSize = 16, fontWeight = "bold", flexGrow = 1, maxLines = 1 }),
-  }
-  for _, a in ipairs(actions or {}) do
-    table.insert(children, a)
-  end
-  table.insert(children, ui.button({ glyph = "close", variant = "ghost", tooltip = "Fechar", onClick = function() panel.close() end }))
-  return ui.row({ align = "center", gap = 8 }, children)
-end
-
 local function renderApps()
   local actions = {}
   local n = pendingCount()
@@ -265,6 +331,7 @@ local function renderApps()
   local children = { header("Aplicativos", actions) }
 
   table.insert(children, ui.input({
+    key = "app-filter",
     value = appFilter,
     placeholder = "Filtrar por nome...",
     onChange = function(v)
@@ -314,12 +381,14 @@ local function renderApps()
     if #sections == 0 then
       table.insert(children, ui.label({ text = "Nenhum toggle encontrado.", color = "on_surface_variant" }))
     else
-      table.insert(children, ui.scroll({ flexGrow = 1, gap = 14 }, sections))
+      table.insert(children, ui.scroll({ flexGrow = 1, gap = 12 }, sections))
     end
   end
 
-  return ui.column({ flexGrow = 1, gap = 12 }, children)
+  return ui.column({ flexGrow = 1, gap = 10, align = "stretch" }, children)
 end
+
+-- ── Chaves (SSH + GPG) ──────────────────────────────────────────────────────
 
 local sshEmail = ""
 local sshPubs = {}
@@ -347,7 +416,7 @@ local function copySshPub(name)
     notifyError("Não consegui ler " .. name)
     return
   end
-  noctalia.copyToClipboard(trim(content))
+  noctalia.copyToClipboard(trim(content), "text/plain")
   notify(name .. " copiado para o clipboard.")
 end
 
@@ -394,6 +463,7 @@ local function renderKeys()
     ui.label({ text = "SSH", fontSize = 14, fontWeight = "bold", color = "primary" }),
     ui.row({ align = "center", gap = 8 }, {
       ui.input({
+        key = "ssh-email",
         value = sshEmail,
         placeholder = "e-mail para o comentário da chave",
         flexGrow = 1,
@@ -437,13 +507,319 @@ local function renderKeys()
   table.insert(children, ui.column({ gap = 8 }, gpgBlock))
   table.insert(children, ui.spacer({ flexGrow = 1 }))
 
-  return ui.column({ flexGrow = 1, gap = 12 }, children)
+  return ui.column({ flexGrow = 1, gap = 10, align = "stretch" }, children)
 end
+
+-- ── seleção + preview (compartilhado entre Instalar e Remover) ─────────────
+
+local selected = nil -- item { key, kind, name, ... }
+local preview = nil -- { loading?: true, text?: string }
+local actionStatus = nil
+
+-- Linhas de commit/hash poluem o preview; o resto é o mesmo texto cru que o
+-- antigo `fzf --preview 'flatpak remote-info ...'` mostrava.
+local HEX_RUN = string.rep("%x", 24)
+
+local function trimInfo(text)
+  local out = {}
+  for _, line in ipairs(splitLines(text)) do
+    local t = trim(line)
+    if t ~= "" and not line:find(HEX_RUN) then
+      out[#out + 1] = line
+      if #out >= 14 then
+        break
+      end
+    end
+  end
+  return table.concat(out, "\n")
+end
+
+local function resetSelection()
+  selected = nil
+  preview = nil
+end
+
+local function loadPreviewFor(item)
+  if item.kind == "nix" then
+    local lines = {}
+    if item.desc ~= nil and item.desc ~= "" then
+      table.insert(lines, item.desc)
+    end
+    if item.version ~= nil and item.version ~= "" then
+      table.insert(lines, "")
+      table.insert(lines, "Versão: " .. item.version)
+    end
+    table.insert(lines, "Attr: " .. (item.attr or item.name))
+    preview = { text = table.concat(lines, "\n") }
+    return
+  end
+
+  if item.kind == "nixInstalled" then
+    local lines = {}
+    table.insert(lines, "Perfil: nix profile")
+    if item.attr ~= nil and item.attr ~= "" then
+      table.insert(lines, "Attr: " .. item.attr)
+    end
+    if item.origin ~= nil and item.origin ~= "" then
+      table.insert(lines, "Origem: " .. item.origin)
+    end
+    if item.version ~= nil and item.version ~= "" then
+      table.insert(lines, "Versão: " .. item.version)
+    end
+    if item.store ~= nil and item.store ~= "" then
+      table.insert(lines, "")
+      table.insert(lines, item.store)
+    end
+    preview = { text = table.concat(lines, "\n") }
+    return
+  end
+
+  if item.kind == "web" then
+    preview = { text = table.concat({
+      "Web app do navegador",
+      "",
+      "URL: " .. (item.url or ""),
+      "Arquivo: " .. (item.file or ""),
+      "Ícone: " .. (item.icon or "-"),
+      "",
+      "Abre em modo app (--app) no navegador detectado.",
+    }, "\n") }
+    return
+  end
+
+  local cmd
+  if item.kind == "flatpak" then
+    cmd = "flatpak remote-info flathub " .. shq(item.id)
+  else
+    local scopeFlag = item.scope == "user" and "--user " or "--system "
+    cmd = "flatpak info " .. scopeFlag .. shq(item.id)
+  end
+
+  preview = { loading = true }
+  local wanted = item.key
+  noctalia.runAsync(cmd, function(res)
+    if selected == nil or selected.key ~= wanted then
+      return
+    end
+    local text = trimInfo((res.exitCode == 0 and res.stdout or res.stderr) or "")
+    preview = { text = text ~= "" and text or "Sem detalhes disponíveis." }
+    render()
+  end, 30000)
+end
+
+selectItem = function(item)
+  if selected ~= nil and selected.key == item.key then
+    return
+  end
+  selected = item
+  preview = nil
+  loadPreviewFor(item)
+  render()
+end
+
+local function itemBadge(item)
+  if item.kind == "flatpak" and item.installed then
+    return "instalado"
+  end
+  if item.kind == "nix" and item.installed then
+    return "instalado"
+  end
+  if item.kind == "flatpakInstalled" then
+    return item.scope == "user" and "user" or "system"
+  end
+  return nil
+end
+
+local function itemRow(item)
+  local active = selected ~= nil and selected.key == item.key
+  local children = {}
+
+  local titleRow = {
+    ui.label({ text = item.name, fontSize = 13, fontWeight = "bold", maxLines = 1, flexGrow = 1 }),
+  }
+  if item.version ~= nil and item.version ~= "" then
+    table.insert(titleRow, ui.label({ text = item.version, fontSize = 10, color = "on_surface_variant", maxLines = 1 }))
+  end
+  local badge = itemBadge(item)
+  if badge ~= nil then
+    table.insert(titleRow, ui.label({ text = badge, fontSize = 9, fontWeight = "bold", color = "primary", maxLines = 1 }))
+  end
+  table.insert(children, ui.row({ gap = 8, align = "center" }, titleRow))
+
+  local sub = item.id or item.attr or item.url or item.store or ""
+  if item.desc ~= nil and item.desc ~= "" then
+    sub = sub .. "  ·  " .. item.desc
+  end
+  table.insert(children, ui.label({ text = sub, fontSize = 10, color = "on_surface_variant", maxLines = 1 }))
+
+  return ui.column({
+    key = item.key,
+    gap = 2,
+    padding = 7,
+    paddingH = 10,
+    fill = active and "primary/0.12" or "surface",
+    radius = 8,
+    flexGrow = 1,
+    onHover = function(state)
+      if state == "true" then
+        selectItem(item)
+      end
+    end,
+    onClick = function()
+      selectItem(item)
+    end,
+  }, children)
+end
+
+-- opts: { action = { label, glyph, enabled, onClick }, empty = string }
+local function selectionPane(opts)
+  local children = {}
+
+  if selected == nil then
+    table.insert(children, ui.glyph({ name = "eye", size = 18, color = "on_surface_variant" }))
+    table.insert(children, ui.label({
+      text = opts.empty or "Passe o mouse ou clique num item para ver os detalhes aqui.",
+      fontSize = 11,
+      color = "on_surface_variant",
+      maxLines = 5,
+    }))
+    return children
+  end
+
+  table.insert(children, ui.label({ text = selected.name, fontSize = 15, fontWeight = "bold", maxLines = 1 }))
+  local meta = selected.id or selected.attr or selected.url or ""
+  if meta ~= "" then
+    table.insert(children, ui.label({ text = meta, fontSize = 10, color = "on_surface_variant", maxLines = 2 }))
+  end
+
+  if preview == nil then
+    table.insert(children, ui.label({ text = "…", fontSize = 11, color = "on_surface_variant" }))
+  elseif preview.loading then
+    table.insert(children, ui.label({ text = "Buscando detalhes...", fontSize = 11, color = "on_surface_variant" }))
+  else
+    table.insert(children, ui.label({ text = preview.text, fontSize = 10, maxLines = 18 }))
+  end
+
+  table.insert(children, ui.spacer({ flexGrow = 1 }))
+
+  if opts.action ~= nil then
+    table.insert(children, ui.button({
+      text = opts.action.label,
+      glyph = opts.action.glyph,
+      variant = opts.action.variant or "primary",
+      enabled = opts.action.enabled ~= false,
+      onClick = opts.action.onClick,
+    }))
+  end
+  if opts.status ~= nil and opts.status ~= "" then
+    table.insert(children, ui.label({ text = opts.status, fontSize = 10, color = "on_surface_variant", maxLines = 4 }))
+  end
+
+  return children
+end
+
+-- ── estado de instalação / remoção ──────────────────────────────────────────
+
+local instTab = "flatpak" -- flatpak | nix | web
+local removeTab = "flatpak" -- flatpak | nix | web
 
 local flQuery = ""
 local flResults = nil
 local flSearching = false
 local flError = nil
+
+local nxQuery = ""
+local nxResults = nil
+local nxSearching = false
+local nxError = nil
+
+local installedFlat = {}
+local installedNix = {}
+
+local flatApps = nil
+local flatLoading = false
+local nixApps = nil
+local nixLoading = false
+local removeError = nil
+
+local webApps = {}
+local webAppsLoaded = false
+
+selectByKey = function(key)
+  local pool = {}
+  if view == "install" then
+    if instTab == "flatpak" then
+      pool = flResults or {}
+    else
+      pool = nxResults or {}
+    end
+  elseif view == "remove" then
+    if removeTab == "flatpak" then
+      pool = flatApps or {}
+    elseif removeTab == "nix" then
+      pool = nixApps or {}
+    else
+      pool = webApps
+    end
+  end
+  for _, item in ipairs(pool) do
+    if item.key == key then
+      selectItem(item)
+      return
+    end
+  end
+  -- fallback por prefixo (útil no CLI: `... all select fl:`)
+  for _, item in ipairs(pool) do
+    if item.key:find(key, 1, true) == 1 then
+      selectItem(item)
+      return
+    end
+  end
+end
+
+local function markInstalled()
+  for _, item in ipairs(flResults or {}) do
+    item.installed = installedFlat[item.id] == true
+  end
+  for _, item in ipairs(nxResults or {}) do
+    item.installed = installedNix[item.name] == true
+  end
+end
+
+local function loadInstalledSets()
+  noctalia.runAsync(
+    "flatpak list --system --app --columns=application 2>/dev/null; printf '\\n--user--\\n'; flatpak list --user --app --columns=application 2>/dev/null",
+    function(res)
+      installedFlat = {}
+      for _, line in splitLines(res.stdout or "") do
+        if line ~= "--user--" then
+          local id = trim(line)
+          if id ~= "" and id:find(".", 1, true) then
+            installedFlat[id] = true
+          end
+        end
+      end
+      markInstalled()
+      render()
+    end
+  )
+
+  noctalia.runAsync("nix profile list --json", function(res)
+    installedNix = {}
+    if res.exitCode == 0 then
+      local ok, data = pcall(noctalia.json.decode, res.stdout or "")
+      if ok and type(data) == "table" and type(data.elements) == "table" then
+        for name in pairs(data.elements) do
+          if name ~= "home-manager-path" then
+            installedNix[name] = true
+          end
+        end
+      end
+    end
+    markInstalled()
+    render()
+  end, 60000)
+end
 
 local function flatSearch(q)
   flSearching = true
@@ -451,35 +827,106 @@ local function flatSearch(q)
   render()
   noctalia.runAsync("flatpak search --columns=application,name,description " .. shq(q), function(res)
     flSearching = false
+    local items = {}
+    if res.exitCode == 0 then
+      for _, line in splitLines(res.stdout) do
+        local id, name, desc = line:match("^([%w_.%-]+)\t([^\t]+)\t?(.*)$")
+        if id and id:find(".", 1, true) then
+          table.insert(items, {
+            key = "fl:" .. id,
+            kind = "flatpak",
+            id = id,
+            name = name,
+            desc = trim(desc),
+            installed = installedFlat[id] == true,
+          })
+        end
+      end
+    end
+    flResults = items
+    if #items == 0 then
+      flError = "Nada encontrado para '" .. q .. "' no Flathub."
+    end
+    resetSelection()
+    render()
+  end, 60000)
+end
+
+local function nixSearch(q)
+  nxSearching = true
+  nxError = nil
+  render()
+  noctalia.runAsync("nix search nixpkgs " .. shq(q) .. " --json", function(res)
+    nxSearching = false
     if res.exitCode ~= 0 then
-      flResults = {}
-      flError = "flatpak search não achou nada para '" .. q .. "'."
+      nxResults = {}
+      nxError = "nix search falhou: " .. trim(res.stderr):sub(1, 300)
+      render()
+      return
+    end
+    local ok, data = pcall(noctalia.json.decode, res.stdout or "")
+    if not ok or type(data) ~= "table" then
+      nxResults = {}
+      nxError = "JSON inválido do nix search"
       render()
       return
     end
     local items = {}
-    for _, line in splitLines(res.stdout) do
-      local id, name, desc = line:match("^([%w%.%-]+)\t([^\t]+)\t?(.*)$")
-      if id and id:find("%.") then
-        table.insert(items, { id = id, name = name, desc = trim(desc) })
+    local needle = q:lower()
+    for key, info in pairs(data) do
+      if type(info) == "table" then
+        local attr = key:match("^legacyPackages%.[^%.]+%.(.+)$") or key
+        local pname = info.pname or attr
+        table.insert(items, {
+          key = "nx:" .. attr,
+          kind = "nix",
+          attr = attr,
+          name = pname,
+          version = info.version or "",
+          desc = info.description or "",
+          installed = installedNix[pname] == true,
+        })
       end
     end
-    while #items > 25 do
+    local function score(a)
+      local n = a.name:lower()
+      if n == needle then return 0 end
+      if n:find(needle, 1, true) == 1 then return 1 end
+      if a.attr:lower():find(needle, 1, true) then return 2 end
+      return 3
+    end
+    table.sort(items, function(a, b)
+      local sa, sb = score(a), score(b)
+      if sa ~= sb then return sa < sb end
+      return a.name < b.name
+    end)
+    while #items > 40 do
       table.remove(items)
     end
-    flResults = items
+    nxResults = items
     if #items == 0 then
-      flError = "Nada encontrado para '" .. q .. "'."
+      nxError = "Nada encontrado para '" .. q .. "' no nixpkgs."
     end
+    resetSelection()
     render()
-  end)
+  end, 60000)
 end
 
 local function flatInstall(id)
   if runInTerminal("sudo flatpak install --system --noninteractive flathub " .. shq(id)) then
-    notify("Instalação de " .. id .. " disparada no terminal.")
+    actionStatus = "Instalação de " .. id .. " no terminal."
+    render()
   end
 end
+
+local function nixInstall(attr)
+  if runInTerminal("nix profile install " .. shq("nixpkgs#" .. attr)) then
+    actionStatus = "Instalando " .. attr .. " no terminal."
+    render()
+  end
+end
+
+-- ── web apps ────────────────────────────────────────────────────────────────
 
 local waName = ""
 local waUrl = ""
@@ -569,6 +1016,54 @@ local function fetchSiteIcon(siteUrl, dest, cb)
   end)
 end
 
+local function loadWebApps()
+  webApps = {}
+  local dir = desktopDir()
+  local entries = noctalia.listDir(dir)
+  if type(entries) == "table" then
+    table.sort(entries)
+    for _, fname in ipairs(entries) do
+      if fname:match("%.desktop$") then
+        local content = noctalia.readFile(dir .. "/" .. fname)
+        if type(content) == "string" then
+          local url = content:match("%-%-app=(%S+)")
+          if url then
+            table.insert(webApps, {
+              key = "web:" .. fname,
+              kind = "web",
+              file = fname,
+              name = content:match("\nName=([^\r\n]+)") or fname,
+              icon = content:match("\nIcon=([^\r\n]+)") or "",
+              url = url,
+            })
+          end
+        end
+      end
+    end
+  end
+  webAppsLoaded = true
+end
+
+local function removeWebApp(app)
+  noctalia.removeFile(desktopDir() .. "/" .. app.file)
+  local icon = app.icon
+  if icon ~= "" and not icon:find("/", 1, true) then
+    for _, ext in ipairs({ ".png", ".svg" }) do
+      local ipath = iconDir() .. "/" .. icon .. ext
+      if noctalia.fileExists(ipath) then
+        noctalia.removeFile(ipath)
+      end
+    end
+  end
+  notify("Web app '" .. app.name .. "' removido.")
+  actionStatus = "Web app '" .. app.name .. "' removido."
+  if selected ~= nil and selected.key == app.key then
+    resetSelection()
+  end
+  loadWebApps()
+  render()
+end
+
 local function createWebApp()
   local name = trim(waName)
   local url = normalizeUrl(waUrl)
@@ -635,125 +1130,178 @@ local function createWebApp()
       notify("Web app '" .. name .. "' criado no launcher.")
       waName = ""
       waUrl = ""
+      loadWebApps()
     end
     render()
   end)
 end
 
-local function renderInstall()
-  local children = { header("Instalar", {}) }
+-- ── Instalar ────────────────────────────────────────────────────────────────
 
-  table.insert(children, ui.label({ text = "Flathub", fontSize = 14, fontWeight = "bold", color = "primary" }))
-  table.insert(children, ui.row({ align = "center", gap = 8 }, {
+local function setInstTab(id)
+  instTab = id
+  resetSelection()
+  actionStatus = nil
+  render()
+end
+
+local function installAction()
+  if selected == nil then
+    return nil
+  end
+  if selected.kind == "flatpak" then
+    if selected.installed then
+      return { label = "Já está instalado", glyph = "check", enabled = false, onClick = "onInstGo" }
+    end
+    return { label = "Instalar (Flatpak)", glyph = "download", onClick = "onInstGo" }
+  end
+  if selected.kind == "nix" then
+    if selected.installed then
+      return { label = "Já está instalado", glyph = "check", enabled = false, onClick = "onInstGo" }
+    end
+    return { label = "Instalar (nix profile)", glyph = "download", onClick = "onInstGo" }
+  end
+  return nil
+end
+
+function onInstGo()
+  if selected == nil then
+    return
+  end
+  if selected.kind == "flatpak" then
+    flatInstall(selected.id)
+  elseif selected.kind == "nix" then
+    nixInstall(selected.attr)
+  end
+end
+
+local function searchBox(key, value, placeholder, onChange, onSubmit, onSearch, busy)
+  return ui.row({ align = "center", gap = 8 }, {
     ui.input({
-      value = flQuery,
-      placeholder = "Buscar app no Flathub...",
+      key = key,
+      value = value,
+      placeholder = placeholder,
       flexGrow = 1,
-      onChange = function(v) flQuery = v or "" end,
-      onSubmit = "onFlSubmit",
+      onChange = onChange,
+      onSubmit = onSubmit,
     }),
     ui.button({
       text = "Buscar",
       glyph = "search",
       variant = "primary",
-      enabled = not flSearching and trim(flQuery) ~= "",
-      onClick = "onFlSearch",
+      enabled = not busy and trim(value) ~= "",
+      onClick = onSearch,
     }),
-  }))
-
-  local flBlock = {}
-  if flSearching then
-    table.insert(flBlock, ui.label({ text = "Buscando...", color = "on_surface_variant" }))
-  elseif flError ~= nil then
-    table.insert(flBlock, ui.label({ text = flError, color = "error" }))
-  elseif flResults ~= nil then
-    for i, item in ipairs(flResults) do
-      table.insert(flBlock, ui.row({ align = "center", gap = 10, key = "fl-" .. item.id }, {
-        ui.column({ gap = 2, flexGrow = 1 }, {
-          ui.label({ text = item.name, fontWeight = "bold", fontSize = 13, maxLines = 1 }),
-          ui.label({ text = item.id .. (#item.desc > 0 and "  ·  " .. item.desc or ""), fontSize = 10, color = "on_surface_variant", maxLines = 1 }),
-        }),
-        ui.button({ text = "Instalar", glyph = "download", variant = "outline", onClick = function() flatInstall(item.id) end }),
-      }))
-      if i < #flResults then
-        table.insert(flBlock, ui.separator({ spacing = 4 }))
-      end
-    end
-  end
-  if #flBlock > 0 then
-    table.insert(children, ui.scroll({ flexGrow = 1, gap = 6 }, flBlock))
-  end
-
-  table.insert(children, ui.separator({ spacing = 6 }))
-  table.insert(children, ui.label({ text = "Web app (" .. browserExec .. " --app)", fontSize = 14, fontWeight = "bold", color = "primary" }))
-  table.insert(children, ui.input({ value = waName, placeholder = "Nome (ex.: YouTube)", onChange = function(v) waName = v or "" end }))
-  table.insert(children, ui.input({
-    value = waUrl,
-    placeholder = "URL (ex.: youtube.com)",
-    onChange = function(v) waUrl = v or "" end,
-    onSubmit = "onWaUrlSubmit",
-  }))
-  table.insert(children, ui.row({ align = "center", gap = 8 }, {
-    ui.button({
-      text = "Criar web app",
-      glyph = "app-window",
-      variant = "primary",
-      enabled = not waCreating,
-      onClick = "onCreateWebApp",
-    }),
-    ui.label({ text = waStatus or "", fontSize = 11, color = "on_surface_variant", flexGrow = 1, maxLines = 1 }),
-  }))
-
-  return ui.column({ flexGrow = 1, gap = 12 }, children)
+  })
 end
 
-local webApps = {}
-local webAppsLoaded = false
-
-local function loadWebApps()
-  webApps = {}
-  local dir = desktopDir()
-  local entries = noctalia.listDir(dir)
-  if type(entries) == "table" then
-    table.sort(entries)
-    for _, fname in ipairs(entries) do
-      if fname:match("%.desktop$") then
-        local content = noctalia.readFile(dir .. "/" .. fname)
-        if type(content) == "string" then
-          local url = content:match("%-%-app=(%S+)")
-          if url then
-            table.insert(webApps, {
-              file = fname,
-              name = content:match("\nName=([^\r\n]+)") or fname,
-              icon = content:match("\nIcon=([^\r\n]+)") or "",
-              url = url,
-            })
-          end
-        end
-      end
-    end
+local function listOrMessage(rows, loading, err, empty)
+  if loading then
+    return { ui.label({ text = "Buscando...", color = "on_surface_variant" }) }
   end
-  webAppsLoaded = true
+  if err ~= nil then
+    return { ui.label({ text = err, color = "error", maxLines = 4 }) }
+  end
+  if #rows == 0 then
+    return { ui.label({ text = empty, color = "on_surface_variant", fontSize = 12 }) }
+  end
+  return rows
 end
 
-local function removeWebApp(app)
-  noctalia.removeFile(desktopDir() .. "/" .. app.file)
-  local icon = app.icon
-  if icon ~= "" and not icon:find("/", 1, true) then
-    for _, ext in ipairs({ ".png", ".svg" }) do
-      local ipath = iconDir() .. "/" .. icon .. ext
-      if noctalia.fileExists(ipath) then
-        noctalia.removeFile(ipath)
+local function renderInstall()
+  local children = { header("Instalar", {}) }
+
+  table.insert(children, tabsBar({
+    { id = "flatpak", label = "Flatpak", glyph = "box" },
+    { id = "nix", label = "Nix", glyph = "package" },
+    { id = "web", label = "Web app", glyph = "app-window" },
+  }, instTab, setInstTab))
+
+  if instTab == "flatpak" then
+    table.insert(children, searchBox(
+      "inst-search-flatpak",
+      flQuery,
+      "Buscar app no Flathub (ex.: vlc)...",
+      function(v) flQuery = v or "" end,
+      "onFlSubmit",
+      "onFlSearch",
+      flSearching
+    ))
+
+    local rows = {}
+    if flResults ~= nil then
+      for _, item in ipairs(flResults) do
+        table.insert(rows, itemRow(item))
       end
     end
+    table.insert(children, splitPane(
+      listOrMessage(rows, flSearching, flError, "Busque um app pelo nome para ver os resultados."),
+      selectionPane({
+        action = installAction(),
+        status = actionStatus,
+        empty = "Passe o mouse num resultado para ver o preview do Flathub aqui.",
+      })
+    ))
+    table.insert(children, hint("O preview mostra os detalhes do app (flatpak remote-info); clicar em Instalar abre o terminal para a senha."))
+  elseif instTab == "nix" then
+    table.insert(children, searchBox(
+      "inst-search-nix",
+      nxQuery,
+      "Buscar pacote no nixpkgs (ex.: ripgrep)...",
+      function(v) nxQuery = v or "" end,
+      "onNxSubmit",
+      "onNxSearch",
+      nxSearching
+    ))
+
+    local rows = {}
+    if nxResults ~= nil then
+      for _, item in ipairs(nxResults) do
+        table.insert(rows, itemRow(item))
+      end
+    end
+    table.insert(children, splitPane(
+      listOrMessage(rows, nxSearching, nxError, "Busque um pacote do nixpkgs para ver os resultados."),
+      selectionPane({
+        action = installAction(),
+        status = actionStatus,
+        empty = "Passe o mouse num pacote para ver descrição, versão e attr aqui.",
+      })
+    ))
+    table.insert(children, hint("Instala com `nix profile install nixpkgs#...` (sem sudo); a remoção fica em Remover › Nix."))
+  else
+    table.insert(children, ui.input({
+      key = "wa-name",
+      value = waName,
+      placeholder = "Nome do web app (ex.: YouTube)",
+      onChange = function(v) waName = v or "" end,
+    }))
+    table.insert(children, ui.input({
+      key = "wa-url",
+      value = waUrl,
+      placeholder = "URL (ex.: youtube.com)",
+      onChange = function(v) waUrl = v or "" end,
+      onSubmit = "onWaUrlSubmit",
+    }))
+    table.insert(children, ui.row({ align = "center", gap = 8 }, {
+      ui.button({
+        text = "Criar web app",
+        glyph = "app-window",
+        variant = "primary",
+        enabled = not waCreating,
+        onClick = "onCreateWebApp",
+      }),
+      ui.label({ text = browserExec .. " --app", fontSize = 10, color = "on_surface_variant", flexGrow = 1, maxLines = 1 }),
+    }))
+    table.insert(children, statusLine(waStatus))
+    table.insert(children, ui.spacer({ flexGrow = 1 }))
+    table.insert(children, hint("Cria um .desktop em ~/.local/share/applications com o ícone do site; some em Remover › Web apps."))
   end
-  notify("Web app '" .. app.name .. "' removido.")
-  loadWebApps()
-  render()
+
+  return ui.column({ flexGrow = 1, gap = 10, align = "stretch" }, children)
 end
 
-local flatApps = nil
-local flatLoading = false
+-- ── Remover ─────────────────────────────────────────────────────────────────
 
 local function loadFlatApps()
   flatLoading = true
@@ -768,9 +1316,16 @@ local function loadFlatApps()
       if line == "--user--" then
         scope = "user"
       else
-        local id, name, ver = line:match("^([%w%.%-]+)\t([^\t]+)\t?([^\t]*)$")
-        if id and id:find("%.") then
-          table.insert(items, { id = id, name = name, version = trim(ver), scope = scope })
+        local id, name, ver = line:match("^([%w_.%-]+)\t([^\t]+)\t?([^\t]*)$")
+        if id and id:find(".", 1, true) then
+          table.insert(items, {
+            key = "ifl:" .. scope .. ":" .. id,
+            kind = "flatpakInstalled",
+            id = id,
+            name = name,
+            version = trim(ver),
+            scope = scope,
+          })
         end
       end
     end
@@ -778,73 +1333,201 @@ local function loadFlatApps()
       return a.name < b.name
     end)
     flatApps = items
+    if selected ~= nil and selected.kind == "flatpakInstalled" then
+      resetSelection()
+    end
     render()
-  end)
+  end, 60000)
+end
+
+local function loadNixProfile()
+  nixLoading = true
+  render()
+  noctalia.runAsync("nix profile list --json", function(res)
+    nixLoading = false
+    local items = {}
+    removeError = nil
+    if res.exitCode == 0 then
+      local ok, data = pcall(noctalia.json.decode, res.stdout or "")
+      if ok and type(data) == "table" and type(data.elements) == "table" then
+        for name, info in pairs(data.elements) do
+          if name ~= "home-manager-path" then
+            info = type(info) == "table" and info or {}
+            local store = (type(info.storePaths) == "table" and info.storePaths[1]) or ""
+            local base = store:match("/([^/]+)$") or ""
+            table.insert(items, {
+              key = "inx:" .. name,
+              kind = "nixInstalled",
+              name = name,
+              version = base:match("-(%d[%w%.%_%+]*)$") or "",
+              attr = info.attrPath or "",
+              store = store,
+              origin = info.originalUrl or "",
+            })
+          end
+        end
+      end
+    else
+      removeError = "nix profile list falhou: " .. trim(res.stderr):sub(1, 200)
+    end
+    table.sort(items, function(a, b)
+      return a.name < b.name
+    end)
+    nixApps = items
+    if selected ~= nil and selected.kind == "nixInstalled" then
+      resetSelection()
+    end
+    render()
+  end, 60000)
 end
 
 local function flatRemove(app)
   if app.scope == "system" then
     if runInTerminal("sudo flatpak uninstall --system --noninteractive " .. shq(app.id)) then
-      notify("Remoção de " .. app.id .. " disparada no terminal.")
+      actionStatus = "Remoção de " .. app.id .. " no terminal."
+      render()
     end
   else
+    actionStatus = "Removendo " .. app.id .. "..."
+    render()
     noctalia.runAsync("flatpak uninstall --user --noninteractive " .. shq(app.id), function(res)
       if res.exitCode == 0 then
+        actionStatus = app.id .. " removido."
         notify(app.id .. " removido.")
       else
+        actionStatus = "Falha: " .. trim(res.stderr):sub(1, 200)
         notifyError("Falha ao remover " .. app.id .. ": " .. trim(res.stderr))
       end
+      resetSelection()
       loadFlatApps()
-    end)
+    end, 60000)
   end
+end
+
+local function nixRemove(item)
+  actionStatus = "Removendo " .. item.name .. " do profile..."
+  render()
+  noctalia.runAsync("nix profile remove " .. shq(item.name), function(res)
+    if res.exitCode == 0 then
+      actionStatus = item.name .. " removido do nix profile."
+      notify(item.name .. " removido do nix profile.")
+    else
+      actionStatus = "Falha: " .. trim(res.stderr):sub(1, 200)
+      notifyError("Falha ao remover " .. item.name .. ": " .. trim(res.stderr))
+    end
+    resetSelection()
+    loadNixProfile()
+  end, 60000)
+end
+
+local function removeAction()
+  if selected == nil then
+    return nil
+  end
+  if selected.kind == "flatpakInstalled" then
+    return { label = "Remover (Flatpak)", glyph = "trash", variant = "destructive", onClick = "onRmGo" }
+  end
+  if selected.kind == "nixInstalled" then
+    return { label = "Remover (nix profile)", glyph = "trash", variant = "destructive", onClick = "onRmGo" }
+  end
+  if selected.kind == "web" then
+    return { label = "Remover web app", glyph = "trash", variant = "destructive", onClick = "onRmGo" }
+  end
+  return nil
+end
+
+function onRmGo()
+  if selected == nil then
+    return
+  end
+  if selected.kind == "flatpakInstalled" then
+    flatRemove(selected)
+  elseif selected.kind == "nixInstalled" then
+    nixRemove(selected)
+  elseif selected.kind == "web" then
+    removeWebApp(selected)
+  end
+end
+
+local function setRemoveTab(id)
+  removeTab = id
+  removeError = nil
+  resetSelection()
+  actionStatus = nil
+  render()
 end
 
 local function renderRemove()
   local children = { header("Remover", {}) }
 
-  table.insert(children, ui.label({ text = "Flatpaks", fontSize = 14, fontWeight = "bold", color = "primary" }))
-  table.insert(children, ui.row({ align = "center", gap = 8 }, {
-    ui.button({ text = "Listar instalados", glyph = "reload", onClick = "onFlatReload", enabled = not flatLoading }),
-    ui.label({ text = flatLoading and "Carregando..." or "", color = "on_surface_variant", fontSize = 11 }),
-  }))
+  table.insert(children, tabsBar({
+    { id = "flatpak", label = "Flatpak", glyph = "box" },
+    { id = "nix", label = "Nix", glyph = "package" },
+    { id = "web", label = "Web apps", glyph = "app-window" },
+  }, removeTab, setRemoveTab))
 
   local rows = {}
-  if flatApps ~= nil then
-    for _, app in ipairs(flatApps) do
-      table.insert(rows, ui.row({ align = "center", gap = 10, key = "rm-" .. app.scope .. "-" .. app.id }, {
-        ui.column({ gap = 2, flexGrow = 1 }, {
-          ui.label({ text = app.name, fontWeight = "bold", fontSize = 13, maxLines = 1 }),
-          ui.label({ text = app.id .. (app.version ~= "" and "  ·  " .. app.version or ""), fontSize = 10, color = "on_surface_variant", maxLines = 1 }),
-        }),
-        ui.label({ text = app.scope, fontSize = 10, color = "on_surface_variant" }),
-        ui.button({ glyph = "trash", variant = "ghost", tooltip = "Remover", onClick = function() flatRemove(app) end }),
-      }))
-    end
-  end
-  table.insert(children, ui.scroll({ flexGrow = 1, gap = 6 }, rows))
+  local loading = false
+  local empty = "Nada aqui."
+  local err = nil
+  local refreshName = "onRmReload"
 
-  table.insert(children, ui.separator({ spacing = 6 }))
-  table.insert(children, ui.label({ text = "Web apps", fontSize = 14, fontWeight = "bold", color = "primary" }))
-  if not webAppsLoaded then
-    loadWebApps()
-  end
-  if #webApps == 0 then
-    table.insert(children, ui.label({ text = "Nenhum web app criado pelo Hamra Control.", fontSize = 11, color = "on_surface_variant" }))
+  if removeTab == "flatpak" then
+    loading = flatLoading
+    err = removeError
+    empty = "Nenhum Flatpak instalado (system + user)."
+    if flatApps == nil then
+      loading = true
+    else
+      for _, item in ipairs(flatApps) do
+        table.insert(rows, itemRow(item))
+      end
+    end
+  elseif removeTab == "nix" then
+    loading = nixLoading
+    err = removeError
+    empty = "Nenhum pacote no nix profile."
+    if nixApps == nil then
+      loading = true
+    else
+      for _, item in ipairs(nixApps) do
+        table.insert(rows, itemRow(item))
+      end
+    end
   else
-    for _, app in ipairs(webApps) do
-      table.insert(children, ui.row({ align = "center", gap = 10, key = "wa-" .. app.file }, {
-        ui.column({ gap = 2, flexGrow = 1 }, {
-          ui.label({ text = app.name, fontWeight = "bold", fontSize = 13, maxLines = 1 }),
-          ui.label({ text = app.url, fontSize = 10, color = "on_surface_variant", maxLines = 1 }),
-        }),
-        ui.button({ glyph = "trash", variant = "ghost", tooltip = "Remover", onClick = function() removeWebApp(app) end }),
-      }))
+    if not webAppsLoaded then
+      loadWebApps()
     end
+    for _, item in ipairs(webApps) do
+      table.insert(rows, itemRow(item))
+    end
+    empty = "Nenhum web app criado pelo Hamra Control."
+    refreshName = "onWebReload"
   end
-  table.insert(children, ui.spacer({ flexGrow = 1 }))
 
-  return ui.column({ flexGrow = 1, gap = 12 }, children)
+  table.insert(children, ui.row({ align = "center", gap = 8 }, {
+    ui.button({ text = "Recarregar lista", glyph = "reload", variant = "ghost", onClick = refreshName, enabled = not loading }),
+    ui.label({
+      text = loading and "Carregando..." or "",
+      color = "on_surface_variant",
+      fontSize = 11,
+      flexGrow = 1,
+    }),
+  }))
+
+  table.insert(children, splitPane(
+    listOrMessage(rows, loading, err, empty),
+    selectionPane({
+      action = removeAction(),
+      status = actionStatus,
+      empty = "Passe o mouse num item para ver os detalhes aqui.",
+    })
+  ))
+
+  return ui.column({ flexGrow = 1, gap = 10, align = "stretch" }, children)
 end
+
+-- ── Atualizar ───────────────────────────────────────────────────────────────
 
 local function renderUpdate()
   local children = { header("Atualizar", {}) }
@@ -855,7 +1538,7 @@ local function renderUpdate()
     color = "on_surface_variant",
   }))
 
-  table.insert(children, ui.column({ gap = 10 }, {
+  table.insert(children, ui.column({ gap = 8 }, {
     ui.button({
       text = "nix flake update + rebuild",
       glyph = "refresh",
@@ -866,16 +1549,13 @@ local function renderUpdate()
     ui.button({ text = "Rebuild (boot, aplica no próximo boot)", glyph = "device-floppy", onClick = "onRebuildBoot" }),
   }))
 
-  table.insert(children, ui.label({
-    text = "O rebuild roda num terminal porque o sudo pede sua senha. O flake update também atualiza o lock do Home Manager.",
-    fontSize = 11,
-    color = "on_surface_variant",
-    maxLines = 4,
-  }))
+  table.insert(children, hint("O rebuild roda num terminal porque o sudo pede sua senha. O flake update também atualiza o lock do Home Manager."))
   table.insert(children, ui.spacer({ flexGrow = 1 }))
 
-  return ui.column({ flexGrow = 1, gap = 12 }, children)
+  return ui.column({ flexGrow = 1, gap = 10, align = "stretch" }, children)
 end
+
+-- ── Sistema ─────────────────────────────────────────────────────────────────
 
 local sysInfo = nil
 local sysLoading = false
@@ -903,7 +1583,7 @@ local function loadSystemInfo()
       uptime = parts[4] or "?",
     }
     render()
-  end)
+  end, 60000)
 end
 
 local function infoRow(label, value)
@@ -931,7 +1611,7 @@ local function renderSystem()
 
   table.insert(children, ui.separator({ spacing = 6 }))
 
-  table.insert(children, ui.column({ gap = 10 }, {
+  table.insert(children, ui.column({ gap = 8 }, {
     ui.button({ text = "Listar gerações", glyph = "list-search", onClick = "onSysGenerations" }),
     ui.button({ text = "Coletar lixo (nix-collect-garbage -d)", glyph = "trash", onClick = "onSysGc" }),
     ui.button({ text = "Editar configuration.nix", glyph = "edit", onClick = "onSysEditConfig" }),
@@ -943,18 +1623,89 @@ local function renderSystem()
     }),
   }))
 
-  table.insert(children, ui.label({
-    text = "Rollback troca o sistema em execução para a geração anterior do perfil system.",
-    fontSize = 11,
-    color = "on_surface_variant",
-    maxLines = 3,
-  }))
+  table.insert(children, hint("Rollback troca o sistema em execução para a geração anterior do perfil system."))
   table.insert(children, ui.spacer({ flexGrow = 1 }))
 
-  return ui.column({ flexGrow = 1, gap = 12 }, children)
+  return ui.column({ flexGrow = 1, gap = 10, align = "stretch" }, children)
 end
 
-function render()
+-- ── Home (menu em grade) ────────────────────────────────────────────────────
+
+local hoveredCard = nil
+
+local function menuCard(entry)
+  local hovered = hoveredCard == entry.id
+  return ui.column({
+    key = "card-" .. entry.id,
+    flexGrow = 1,
+    height = 104,
+    gap = 6,
+    padding = 14,
+    paddingV = 12,
+    align = "start",
+    fill = hovered and "primary/0.12" or "surface",
+    radius = 12,
+    border = "outline",
+    borderWidth = 1,
+    onHover = function(state)
+      local id = (state == "true") and entry.id or nil
+      if hoveredCard ~= id then
+        hoveredCard = id
+        render()
+      end
+    end,
+    onClick = function()
+      openView(entry.id)
+    end,
+  }, {
+    ui.glyph({ name = entry.glyph, size = 22, color = "primary" }),
+    ui.label({ text = entry.label, fontSize = 15, fontWeight = "bold", maxLines = 1 }),
+    ui.label({ text = entry.sub, fontSize = 10, color = "on_surface_variant", maxLines = 2 }),
+  })
+end
+
+local function renderHome()
+  local rows = {}
+  for i = 1, #MENU, 3 do
+    local row = {}
+    for j = i, math.min(i + 2, #MENU) do
+      table.insert(row, menuCard(MENU[j]))
+    end
+    table.insert(rows, ui.row({ gap = 10, align = "stretch" }, row))
+  end
+
+  local footer = {}
+  local n = pendingCount()
+  if n > 0 then
+    table.insert(footer, ui.row({ align = "center", gap = 8 }, {
+      ui.glyph({ name = "alert-triangle", size = 16, color = "warning" }),
+      ui.label({
+        text = n == 1 and "1 toggle pendente de aplicar" or (n .. " toggles pendentes de aplicar"),
+        fontSize = 12,
+        flexGrow = 1,
+      }),
+      ui.button({ text = "Rebuild (" .. n .. ")", glyph = "refresh", variant = "primary", onClick = "onRebuildSwitch" }),
+    }))
+  end
+
+  return ui.column({ flexGrow = 1, gap = 14, align = "stretch" }, {
+    ui.row({ align = "center", gap = 8 }, {
+      ui.glyph({ name = "settings", size = 18, color = "primary" }),
+      ui.label({ text = "Hamra Control", fontSize = 18, fontWeight = "bold", flexGrow = 1 }),
+      ui.button({ glyph = "close", variant = "ghost", tooltip = "Fechar", onClick = function() panel.close() end }),
+    }),
+    ui.label({ text = "Host: " .. host .. "  ·  " .. repo, fontSize = 11, color = "on_surface_variant" }),
+    ui.spacer({ flexGrow = 1 }),
+    ui.column({ gap = 10, align = "stretch" }, rows),
+    ui.spacer({ flexGrow = 1 }),
+    ui.column({ gap = 8 }, footer),
+    hint("Atalho: Alt+Space · ou digite /hamra no launcher."),
+  })
+end
+
+-- ── render / navegação ──────────────────────────────────────────────────────
+
+render = function()
   local content
   if view == "apps" then
     content = renderApps()
@@ -969,66 +1720,44 @@ function render()
   elseif view == "system" then
     content = renderSystem()
   else
-    local rows = {}
-    for i = 1, #MENU, 2 do
-      local pair = {}
-      local left = MENU[i]
-      local right = MENU[i + 1]
-      table.insert(pair, ui.button({
-        text = left.label,
-        glyph = left.glyph,
-        variant = "outline",
-        width = 340,
-        height = 52,
-        tooltip = left.sub,
-        onClick = function() openView(left.id) end,
-      }))
-      if right ~= nil then
-        table.insert(pair, ui.button({
-          text = right.label,
-          glyph = right.glyph,
-          variant = "outline",
-          width = 340,
-          height = 52,
-          tooltip = right.sub,
-          onClick = function() openView(right.id) end,
-        }))
-      end
-      table.insert(rows, ui.row({ gap = 10, align = "center" }, pair))
-    end
-    content = ui.column({ flexGrow = 1, gap = 14 }, {
-      ui.row({ align = "center", gap = 8 }, {
-        ui.glyph({ name = "settings", size = 18, color = "primary" }),
-        ui.label({ text = "Hamra Control", fontSize = 18, fontWeight = "bold", flexGrow = 1 }),
-        ui.button({ glyph = "close", variant = "ghost", tooltip = "Fechar", onClick = function() panel.close() end }),
-      }),
-      ui.label({ text = "Host: " .. host .. "  ·  " .. repo, fontSize = 11, color = "on_surface_variant" }),
-      ui.column({ gap = 10 }, rows),
-      ui.spacer({ flexGrow = 1 }),
-    })
+    content = renderHome()
   end
   panel.render(content)
 end
 
-function openView(id)
+openView = function(id)
   view = id
   rollbackArmed = false
+  hoveredCard = nil
+  actionStatus = nil
   if id == "apps" and not appsLoaded and not appsLoading then
     loadApps()
   elseif id == "system" and sysInfo == nil and not sysLoading then
     loadSystemInfo()
   elseif id == "keys" then
     loadSshPubs()
-  elseif id == "remove" and flatApps == nil and not flatLoading then
-    loadFlatApps()
-    loadWebApps()
+  elseif id == "install" then
+    loadInstalledSets()
+  elseif id == "remove" then
+    if flatApps == nil and not flatLoading then
+      loadFlatApps()
+    end
+    if nixApps == nil and not nixLoading then
+      loadNixProfile()
+    end
+    if not webAppsLoaded then
+      loadWebApps()
+    end
   end
   render()
 end
 
+-- ── callbacks (globals chamados pelo host) ──────────────────────────────────
+
 function onBack()
   view = "home"
   rollbackArmed = false
+  hoveredCard = nil
   render()
 end
 
@@ -1101,6 +1830,19 @@ function onFlSubmit(value)
   end
 end
 
+function onNxSearch()
+  if trim(nxQuery) ~= "" then
+    nixSearch(nxQuery)
+  end
+end
+
+function onNxSubmit(value)
+  nxQuery = trim(value or nxQuery)
+  if nxQuery ~= "" then
+    nixSearch(nxQuery)
+  end
+end
+
 function onWaUrlSubmit(value)
   waUrl = value or waUrl
   createWebApp()
@@ -1110,8 +1852,20 @@ function onCreateWebApp()
   createWebApp()
 end
 
-function onFlatReload()
-  loadFlatApps()
+function onWebReload()
+  loadWebApps()
+  render()
+end
+
+function onRmReload()
+  if removeTab == "flatpak" then
+    loadFlatApps()
+  elseif removeTab == "nix" then
+    loadNixProfile()
+  else
+    loadWebApps()
+    render()
+  end
 end
 
 function onUpdateAll()
@@ -1157,6 +1911,62 @@ function onSysRollback()
   render()
 end
 
+-- Controle externo via `noctalia msg plugin gabrielnathan929/hamra-control:main all <evento> [payload]`:
+--   view   <id>        abre uma view (home, apps, install, remove, update, keys, system)
+--   tab    <view>:<tab> troca a aba (install:flatpak | install:nix | install:web | remove:...)
+--   search <origem> <q> busca e mostra o preview (flatpak | nix)
+--   select <key>       seleciona um item para o preview (fl:, nx:, ifl:, inx:, web:)
+function onIpc(event, payload)
+  local e = trim(event or "")
+  local p = trim(payload or "")
+
+  if e == "view" then
+    if p == "" or p == "home" then
+      view = "home"
+      render()
+    else
+      openView(p)
+    end
+    return
+  end
+
+  if e == "tab" then
+    local v, t = p:match("^([%w]+):([%w%-_]+)$")
+    if v ~= nil then
+      if v == "install" then
+        setInstTab(t)
+      elseif v == "remove" then
+        setRemoveTab(t)
+      end
+      if view ~= v then
+        openView(v)
+      end
+    end
+    return
+  end
+
+  if e == "search" then
+    local origin, q = p:match("^(%w+)%s+(.+)$")
+    if origin == "flatpak" then
+      flQuery = q
+      instTab = "flatpak"
+      openView("install")
+      flatSearch(q)
+    elseif origin == "nix" then
+      nxQuery = q
+      instTab = "nix"
+      openView("install")
+      nixSearch(q)
+    end
+    return
+  end
+
+  if e == "select" then
+    selectByKey(p)
+    return
+  end
+end
+
 function onOpen(_)
   local v = noctalia.state.get("hamra_view")
   if type(v) == "string" and v ~= "" then
@@ -1167,9 +1977,19 @@ function onOpen(_)
   local q = noctalia.state.get("hamra_install_query")
   if type(q) == "string" and q ~= "" then
     noctalia.state.set("hamra_install_query", "")
-    openView("install")
-    flQuery = q
-    flatSearch(q)
+    local tab = noctalia.state.get("hamra_install_tab")
+    noctalia.state.set("hamra_install_tab", "")
+    instTab = (type(tab) == "string" and tab == "nix") and "nix" or "flatpak"
+    resetSelection()
+    if instTab == "nix" then
+      nxQuery = q
+      openView("install")
+      nixSearch(q)
+    else
+      flQuery = q
+      openView("install")
+      flatSearch(q)
+    end
     return
   end
   if view ~= "home" then
