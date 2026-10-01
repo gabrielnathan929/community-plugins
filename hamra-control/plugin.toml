@@ -1,6 +1,6 @@
-id = "gabrielnathan929/nixdeck"
-name = "NixDeck"
-version = "0.3.0"
+id = "gabrielnathan929/hamra-control"
+name = "Hamra Control"
+version = "0.4.0"
 plugin_api = 3
 author = "gabrielnathan929"
 license = "MIT"
@@ -20,5 +20,5 @@ position = "auto"
 [[launcher_provider]]
 id = "menu"
 entry = "launcher.luau"
-prefix = "nixdeck"
+prefix = "hamra"
 include_in_global_search = false

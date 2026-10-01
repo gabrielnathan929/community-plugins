@@ -1,6 +1,6 @@
 --!nonstrict
 
-local PANEL_ID = "gabrielnathan929/nixdeck:main"
+local PANEL_ID = "gabrielnathan929/hamra-control:main"
 
 local MENU = {
   { id = "apps", label = "Aplicativos", glyph = "app-window", sub = "Toggles do hamra.programs" },
@@ -44,20 +44,20 @@ function onQuery(query)
       rows[#rows + 1] = {
         id = "search-flathub:" .. text,
         title = "Buscar '" .. text .. "' no Flathub",
-        subtitle = "Abre NixDeck › Instalar › Flatpak",
+        subtitle = "Abre Hamra Control › Instalar › Flatpak",
         glyph = "box",
       }
       rows[#rows + 1] = {
         id = "search-nix:" .. text,
         title = "Buscar '" .. text .. "' no nixpkgs",
-        subtitle = "Abre NixDeck › Instalar › Nix",
+        subtitle = "Abre Hamra Control › Instalar › Nix",
         glyph = "package",
       }
       rows[#rows + 1] = {
         id = "search-mise:" .. text,
         title = "Buscar '" .. text .. "' no mise",
-        subtitle = "Abre NixDeck › Instalar › Mise",
-        glyph = "wrench",
+        subtitle = "Abre Hamra Control › Instalar › Mise",
+        glyph = "tool",
       }
     end
   end

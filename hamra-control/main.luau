@@ -82,6 +82,7 @@ local render
 local openView
 local selectItem
 local selectByKey
+local rollbackArmed = false
 
 local view = "home"
 
@@ -588,6 +589,38 @@ local function loadPreviewFor(item)
     return
   end
 
+  if item.kind == "webnix" then
+    preview = { text = table.concat({
+      "Web app declarado no Nix",
+      "",
+      "URL: " .. (item.url or ""),
+      "Declaração: hamra.webapps." .. (item.nixKey or ""),
+      "Manifesto: /etc/hamra/apps.json",
+      "",
+      "Declarativo: para remover, desligue o toggle correspondente",
+      "em Aplicativos (ex.: optionals.gui.notion) e faça rebuild.",
+    }, "\n") }
+    return
+  end
+
+  if item.kind == "updTask" or item.kind == "sysTask" then
+    preview = { text = item.detail or item.name }
+    return
+  end
+
+  if item.kind == "miseOutdated" then
+    preview = { text = table.concat({
+      "Atualização mise disponível",
+      "",
+      "Instalada: " .. (item.installed or "?"),
+      "Latest: " .. (item.latest or "?"),
+      "",
+      "Atualizar: mise upgrade " .. item.name,
+      "Remover: mise unuse -g " .. item.name,
+    }, "\n") }
+    return
+  end
+
   if item.kind == "mise" then
     preview = { text = table.concat({
       "Ferramenta mise",
@@ -638,6 +671,7 @@ selectItem = function(item)
   end
   selected = item
   preview = nil
+  rollbackArmed = false
   loadPreviewFor(item)
   render()
 end
@@ -655,6 +689,9 @@ local function itemBadge(item)
   if item.kind == "flatpakInstalled" then
     return item.scope == "user" and "user" or "system"
   end
+  if item.kind == "webnix" then
+    return "nix"
+  end
   return nil
 end
 
@@ -662,9 +699,11 @@ local function itemRow(item)
   local active = selected ~= nil and selected.key == item.key
   local children = {}
 
-  local titleRow = {
-    ui.label({ text = item.name, fontSize = 13, fontWeight = "bold", maxLines = 1, flexGrow = 1 }),
-  }
+  local titleRow = {}
+  if item.glyph ~= nil then
+    table.insert(titleRow, ui.glyph({ name = item.glyph, size = 15, color = active and "primary" or "on_surface_variant" }))
+  end
+  table.insert(titleRow, ui.label({ text = item.name, fontSize = 13, fontWeight = "bold", maxLines = 1, flexGrow = 1 }))
   if item.version ~= nil and item.version ~= "" then
     table.insert(titleRow, ui.label({ text = item.version, fontSize = 10, color = "on_surface_variant", maxLines = 1 }))
   end
@@ -778,6 +817,157 @@ local miseTools = nil
 local miseLoading = false
 local miseError = nil
 
+local miseOutdated = nil
+local miseOutdatedLoading = false
+local miseOutdatedError = nil
+
+local updateTasks = {
+  {
+    key = "upd:flake",
+    kind = "updTask",
+    glyph = "refresh",
+    name = "nix flake update + rebuild",
+    id = "nix flake update && sudo nixos-rebuild switch",
+    detail = table.concat({
+      "Comando:",
+      "cd " .. repo .. " && nix flake update && sudo nixos-rebuild switch --flake " .. repo .. "#" .. host,
+      "",
+      "Atualiza todos os inputs do flake (nixpkgs, home-manager, ...)",
+      "junto com o lock e reconstrói o sistema na hora.",
+      "A senha do sudo é pedida no terminal.",
+    }, "\n"),
+    actionLabel = "Atualizar tudo",
+    actionGlyph = "refresh",
+    onClick = "onUpdateAll",
+  },
+  {
+    key = "upd:switch",
+    kind = "updTask",
+    glyph = "player-play",
+    name = "Rebuild (switch)",
+    id = "sudo nixos-rebuild switch",
+    detail = table.concat({
+      "Comando:",
+      "sudo nixos-rebuild switch --flake " .. repo .. "#" .. host,
+      "",
+      "Reaplica o configuration.nix atual sem atualizar os inputs.",
+      "Use depois de mexer em toggles ou config do host.",
+      "A senha do sudo é pedida no terminal.",
+    }, "\n"),
+    actionLabel = "Executar rebuild",
+    actionGlyph = "player-play",
+    onClick = "onRebuildSwitch2",
+  },
+  {
+    key = "upd:boot",
+    kind = "updTask",
+    glyph = "device-floppy",
+    name = "Rebuild (boot)",
+    id = "sudo nixos-rebuild boot",
+    detail = table.concat({
+      "Comando:",
+      "sudo nixos-rebuild boot --flake " .. repo .. "#" .. host,
+      "",
+      "Prepara a próxima geração sem ativá-la.",
+      "Aplica somente no próximo boot (vai para o bootloader).",
+      "A senha do sudo é pedida no terminal.",
+    }, "\n"),
+    actionLabel = "Preparar boot",
+    actionGlyph = "device-floppy",
+    onClick = "onRebuildBoot",
+  },
+}
+
+local systemTasks = {
+  {
+    key = "sys:generations",
+    kind = "sysTask",
+    glyph = "list-search",
+    name = "Listar gerações",
+    id = "sudo nixos-rebuild list-generations",
+    detail = table.concat({
+      "Comando:",
+      "sudo nixos-rebuild list-generations",
+      "",
+      "Mostra o histórico de gerações do perfil system:",
+      "o que mudou, quando foi aplicado e qual é a ativa.",
+    }, "\n"),
+    actionLabel = "Abrir no terminal",
+    actionGlyph = "list-search",
+    onClick = "onSysGenerations",
+  },
+  {
+    key = "sys:gc",
+    kind = "sysTask",
+    glyph = "trash",
+    name = "Coletar lixo",
+    id = "sudo nix-collect-garbage -d",
+    detail = table.concat({
+      "Comando:",
+      "sudo nix-collect-garbage -d",
+      "",
+      "Remove gerações antigas do perfil system e o lixo",
+      "do /nix/store, liberando disco. A geração ativa fica.",
+      "A senha do sudo é pedida no terminal.",
+    }, "\n"),
+    actionLabel = "Executar GC",
+    actionGlyph = "trash",
+    onClick = "onSysGc",
+  },
+  {
+    key = "sys:config",
+    kind = "sysTask",
+    glyph = "edit",
+    name = "Editar configuration.nix",
+    id = "hosts/" .. host .. "/configuration.nix",
+    detail = table.concat({
+      "Abre no editor:",
+      repo .. "/hosts/" .. host .. "/configuration.nix",
+      "",
+      "É o arquivo que os toggles da tela Aplicativos",
+      "escrevem; edite à mão para mudanças fora do padrão.",
+    }, "\n"),
+    actionLabel = "Abrir editor",
+    actionGlyph = "edit",
+    onClick = "onSysEditConfig",
+  },
+  {
+    key = "sys:rollback",
+    kind = "sysTask",
+    glyph = "restore",
+    name = "Rollback para geração anterior",
+    id = "switch-to-configuration rollback",
+    detail = table.concat({
+      "Comando:",
+      "sudo /run/current-system/bin/switch-to-configuration rollback",
+      "",
+      "Volta o sistema em execução para a geração anterior",
+      "do perfil system. Não apaga nada: as gerações continuam",
+      "intactas e você pode voltar a qualquer momento.",
+    }, "\n"),
+    actionLabel = "Fazer rollback",
+    actionGlyph = "restore",
+    onClick = "onSysRollback",
+    armedLabel = "Confirmar rollback?",
+  },
+}
+
+local function miseOutdatedItems()
+  local items = {}
+  for _, row in ipairs(miseOutdated or {}) do
+    table.insert(items, {
+      key = "mo:" .. row.name,
+      kind = "miseOutdated",
+      glyph = "download",
+      name = row.name,
+      id = row.installed .. " → " .. row.latest,
+      installed = row.installed,
+      latest = row.latest,
+    })
+  end
+  return items
+end
+
 local mxQuery = ""
 local mxResults = nil
 local mxSearching = false
@@ -803,6 +993,16 @@ selectByKey = function(key)
     else
       pool = webApps
     end
+  elseif view == "update" then
+    pool = {}
+    for _, item in ipairs(updateTasks) do
+      table.insert(pool, item)
+    end
+    for _, item in ipairs(miseOutdatedItems()) do
+      table.insert(pool, item)
+    end
+  elseif view == "system" then
+    pool = systemTasks
   end
   for _, item in ipairs(pool) do
     if item.key == key then
@@ -1074,6 +1274,51 @@ local function tryDownloadSeq(urls, dest, cb, idx)
   end)
 end
 
+local function resolveHref(href, origin)
+  if href:match("^//") then
+    return "https:" .. href
+  elseif href:match("^/") then
+    return origin .. href
+  elseif not href:match("^https?://") then
+    return origin .. "/" .. href
+  end
+  return href
+end
+
+local function findAppleTouchIcon(body, origin)
+  local head = body:sub(1, 262144)
+  local pos = head:find("apple-touch-icon", 1, true)
+  if pos == nil then
+    return nil
+  end
+  local winFrom = math.max(1, pos - 600)
+  local win = head:sub(winFrom, math.min(#head, pos + 600))
+  local relAt = pos - winFrom + 1
+  local tagAt = nil
+  local scan = 1
+  while true do
+    local i = win:find("<link", scan, true)
+    if i == nil or i > relAt then
+      break
+    end
+    local gt = win:find(">", i, true)
+    if gt == nil or gt > relAt then
+      tagAt = i
+      break
+    end
+    scan = i + 1
+  end
+  if tagAt == nil then
+    return nil
+  end
+  local tagEnd = win:find(">", tagAt, true) or #win
+  local href = win:sub(tagAt, tagEnd):match('href%s*=%s*["\']([^"\']+)["\']')
+  if href == nil then
+    return nil
+  end
+  return resolveHref(href, origin)
+end
+
 local function fetchSiteIcon(siteUrl, dest, cb)
   local domain = siteUrl:match("^https?://([^/:?#]+)")
   if domain == nil then
@@ -1081,40 +1326,51 @@ local function fetchSiteIcon(siteUrl, dest, cb)
     return
   end
   local origin = siteUrl:match("^(https?://[^/]+)") or ("https://" .. domain)
-  local apple = nil
   noctalia.http({ url = siteUrl, headers = { "User-Agent: Mozilla/5.0" } }, function(res)
+    local urls = {}
     local body = res.body or res.text or res.data
     if res.ok and type(body) == "string" then
-      local tag = body:match('<link[^>]-rel=["\'][^"\']-apple%-touch%-icon[^"\']-["\'][^>]->')
-      local href = tag and tag:match('href%s*=%s*["\']([^"\']+)["\']')
-      if href == nil then
-        for tag2 in body:gmatch("<link[^>]->") do
-          if tag2:find("apple%-touch%-icon") then
-            href = tag2:match('href%s*=%s*["\']([^"\']+)["\']')
-            if href then break end
-          end
+      pcall(function()
+        local apple = findAppleTouchIcon(body, origin)
+        if apple ~= nil then
+          table.insert(urls, apple)
         end
-      end
-      if href then
-        if href:match("^//") then
-          apple = "https:" .. href
-        elseif href:match("^/") then
-          apple = origin .. href
-        elseif not href:match("^https?://") then
-          apple = origin .. "/" .. href
-        else
-          apple = href
-        end
-      end
-    end
-    local urls = {}
-    if apple then
-      table.insert(urls, apple)
+      end)
     end
     table.insert(urls, origin .. "/apple-touch-icon.png")
     table.insert(urls, "https://www.google.com/s2/favicons?domain=" .. noctalia.string.urlEncode(domain) .. "&sz=256")
     tryDownloadSeq(urls, dest, cb)
   end)
+end
+
+local function loadNixWebApps()
+  local items = {}
+  local manifest = noctalia.readFile("/etc/hamra/apps.json")
+  if type(manifest) ~= "string" or trim(manifest) == "" then
+    return items
+  end
+  local ok, data = pcall(noctalia.json.decode, manifest)
+  if not ok or type(data) ~= "table" or type(data.webapps) ~= "table" then
+    return items
+  end
+  local names = {}
+  for name in pairs(data.webapps) do
+    table.insert(names, name)
+  end
+  table.sort(names)
+  for _, name in ipairs(names) do
+    local app = data.webapps[name]
+    if type(app) == "table" and type(app.url) == "string" then
+      table.insert(items, {
+        key = "webnix:" .. name,
+        kind = "webnix",
+        nixKey = name,
+        name = (type(app.name) == "string" and app.name) or name,
+        url = app.url,
+      })
+    end
+  end
+  return items
 end
 
 local function loadWebApps()
@@ -1142,6 +1398,9 @@ local function loadWebApps()
       end
     end
   end
+  for _, item in ipairs(loadNixWebApps()) do
+    table.insert(webApps, item)
+  end
   webAppsLoaded = true
 end
 
@@ -1163,6 +1422,42 @@ local function removeWebApp(app)
   end
   loadWebApps()
   render()
+end
+
+local function writeWebAppDesktop(name, url, iconValue)
+  local desktopFile = desktopDir() .. "/" .. name .. ".desktop"
+  local content = table.concat({
+    "[Desktop Entry]",
+    "Version=1.0",
+    "Name=" .. desktopEscape(name),
+    "Comment=" .. desktopEscape(name),
+    "Exec=" .. desktopEscape(browserExec .. " --app=" .. url),
+    "Terminal=false",
+    "Type=Application",
+    "Icon=" .. desktopEscape(iconValue),
+    "StartupNotify=true",
+    "Categories=Network;",
+    "",
+  }, "\n")
+
+  noctalia.mkdirAll(desktopDir())
+  noctalia.writeFile(desktopFile, content)
+
+  local check = noctalia.readFile(desktopFile)
+  if type(check) ~= "string" or not check:find("Name=" .. desktopEscape(name), 1, true) then
+    return nil
+  end
+  return desktopFile
+end
+
+local function setWebAppIcon(desktopFile, iconValue)
+  local content = noctalia.readFile(desktopFile)
+  if type(content) ~= "string" then
+    return false
+  end
+  content = content:gsub("Icon=[^\n]*", "Icon=" .. iconValue, 1)
+  noctalia.writeFile(desktopFile, content)
+  return true
 end
 
 local function createWebApp()
@@ -1187,51 +1482,34 @@ local function createWebApp()
   end
 
   waCreating = true
-  waStatus = "Buscando ícone do site..."
+  waStatus = "Criando lançador..."
   render()
 
   local iconValue = safeIconName(name)
+  local desktopFile = writeWebAppDesktop(name, url, "text-html")
+  waCreating = false
+
+  if desktopFile == nil then
+    waStatus = nil
+    notifyError("Não consegui escrever " .. desktopDir() .. "/" .. name .. ".desktop")
+    render()
+    return
+  end
+
+  waStatus = "Criado! Buscando ícone do site..."
+  notify("Web app '" .. name .. "' criado no launcher.")
+  waName = ""
+  waUrl = ""
+  loadWebApps()
+  render()
+
   local dest = iconDir() .. "/" .. iconValue .. ".png"
   noctalia.mkdirAll(iconDir())
-
   fetchSiteIcon(url, dest, function(ok)
-    if not ok then
-      iconValue = "text-html"
-      waStatus = "Sem ícone; usando ícone genérico."
+    if ok and setWebAppIcon(desktopFile, iconValue) then
+      waStatus = "Criado com ícone do site."
     else
-      waStatus = "Criando lançador..."
-    end
-    render()
-
-    local desktopFile = desktopDir() .. "/" .. name .. ".desktop"
-    local content = table.concat({
-      "[Desktop Entry]",
-      "Version=1.0",
-      "Name=" .. desktopEscape(name),
-      "Comment=" .. desktopEscape(name),
-      "Exec=" .. desktopEscape(browserExec .. " --app=" .. url),
-      "Terminal=false",
-      "Type=Application",
-      "Icon=" .. desktopEscape(iconValue),
-      "StartupNotify=true",
-      "Categories=Network;",
-      "",
-    }, "\n")
-
-    noctalia.mkdirAll(desktopDir())
-    noctalia.writeFile(desktopFile, content)
-
-    local check = noctalia.readFile(desktopFile)
-    waCreating = false
-    if type(check) ~= "string" or not check:find("Name=" .. desktopEscape(name), 1, true) then
-      waStatus = nil
-      notifyError("Não consegui escrever " .. desktopFile)
-    else
-      waStatus = "Criado! Disponível no launcher."
-      notify("Web app '" .. name .. "' criado no launcher.")
-      waName = ""
-      waUrl = ""
-      loadWebApps()
+      waStatus = "Criado com ícone genérico."
     end
     render()
   end)
@@ -1323,7 +1601,7 @@ local function renderInstall()
   table.insert(children, tabsBar({
     { id = "flatpak", label = "Flatpak", glyph = "box" },
     { id = "nix", label = "Nix", glyph = "package" },
-    { id = "mise", label = "Mise", glyph = "wrench" },
+    { id = "mise", label = "Mise", glyph = "tool" },
     { id = "web", label = "Web app", glyph = "app-window" },
   }, instTab, setInstTab))
 
@@ -1624,6 +1902,9 @@ local function removeAction()
   if selected.kind == "web" then
     return { label = "Remover web app", glyph = "trash", variant = "destructive", onClick = "onRmGo" }
   end
+  if selected.kind == "webnix" then
+    return { label = "Gerido pelo Nix (declarativo)", glyph = "package", enabled = false, onClick = "onRmGo" }
+  end
   return nil
 end
 
@@ -1656,7 +1937,7 @@ local function renderRemove()
   table.insert(children, tabsBar({
     { id = "flatpak", label = "Flatpak", glyph = "box" },
     { id = "nix", label = "Nix", glyph = "package" },
-    { id = "mise", label = "Mise", glyph = "wrench" },
+    { id = "mise", label = "Mise", glyph = "tool" },
     { id = "web", label = "Web apps", glyph = "app-window" },
   }, removeTab, setRemoveTab))
 
@@ -1706,7 +1987,7 @@ local function renderRemove()
     for _, item in ipairs(webApps) do
       table.insert(rows, itemRow(item))
     end
-    empty = "Nenhum web app criado pelo Hamra Control."
+    empty = "Nenhum web app (criado no painel ou declarado no Nix)."
     refreshName = "onWebReload"
   end
 
@@ -1734,10 +2015,6 @@ end
 
 -- ── Atualizar ───────────────────────────────────────────────────────────────
 
-local miseOutdated = nil
-local miseOutdatedLoading = false
-local miseOutdatedError = nil
-
 local function loadMiseOutdated()
   miseOutdatedLoading = true
   miseOutdatedError = nil
@@ -1750,10 +2027,20 @@ local function loadMiseOutdated()
     else
       local ok, data = pcall(noctalia.json.decode, res.stdout or "")
       if ok and type(data) == "table" then
-        for name, versions in pairs(data) do
-          local current = type(versions) == "table" and versions[1] or nil
-          local installedV = (current ~= nil and type(current) == "table") and current.version or nil
-          local latestV = (current ~= nil and type(current) == "table") and (current.latest or current.bump or current.version) or nil
+        for name, entry in pairs(data) do
+          local installedV = nil
+          local latestV = nil
+          if type(entry) == "table" then
+            if type(entry.current) == "string" then
+              installedV = entry.current
+              latestV = (type(entry.latest) == "string" and entry.latest)
+                or (type(entry.bump) == "string" and entry.bump)
+                or entry.current
+            elseif type(entry[1]) == "table" then
+              installedV = entry[1].version
+              latestV = entry[1].latest or entry[1].bump or entry[1].version
+            end
+          end
           rows[#rows + 1] = { name = name, installed = installedV or "?", latest = latestV or "?" }
         end
       end
@@ -1766,8 +2053,35 @@ local function loadMiseOutdated()
   end, 60000)
 end
 
+local function updateAction()
+  if selected == nil then
+    return nil
+  end
+  if selected.kind == "updTask" then
+    return {
+      label = selected.actionLabel,
+      glyph = selected.actionGlyph,
+      variant = "primary",
+      onClick = selected.onClick,
+    }
+  end
+  if selected.kind == "miseOutdated" then
+    local name = selected.name
+    return {
+      label = "mise upgrade " .. name,
+      glyph = "download",
+      onClick = function()
+        onMiseUpgrade(name)
+      end,
+    }
+  end
+  return nil
+end
+
 local function renderUpdate()
-  local children = { header("Atualizar", {}) }
+  local children = { header("Atualizar", {
+    ui.button({ glyph = "reload", variant = "ghost", tooltip = "Recarregar lista mise", onClick = "onMiseReload", enabled = not miseOutdatedLoading }),
+  }) }
 
   table.insert(children, ui.label({
     text = "Host: " .. host .. "  ·  " .. repo,
@@ -1775,48 +2089,37 @@ local function renderUpdate()
     color = "on_surface_variant",
   }))
 
-  table.insert(children, ui.column({ gap = 8 }, {
-    ui.button({
-      text = "nix flake update + rebuild",
-      glyph = "refresh",
-      variant = "primary",
-      onClick = "onUpdateAll",
-    }),
-    ui.button({ text = "Rebuild (switch)", glyph = "player-play", onClick = "onRebuildSwitch2" }),
-    ui.button({ text = "Rebuild (boot, aplica no próximo boot)", glyph = "device-floppy", onClick = "onRebuildBoot" }),
-  }))
-
-  table.insert(children, ui.separator({ spacing = 6 }))
-
-  local miseBlock = {
-    ui.row({ align = "center", gap = 8 }, {
-      ui.label({ text = "Ferramentas mise", fontSize = 14, fontWeight = "bold", color = "primary", flexGrow = 1 }),
-      ui.button({ glyph = "reload", variant = "ghost", tooltip = "Recarregar", onClick = "onMiseReload", enabled = not miseOutdatedLoading }),
-    }),
+  local rows = {
+    ui.label({ text = "Sistema", fontSize = 14, fontWeight = "bold", color = "primary" }),
   }
+  for _, task in ipairs(updateTasks) do
+    table.insert(rows, itemRow(task))
+  end
+
+  table.insert(rows, ui.label({ text = "Ferramentas mise", fontSize = 14, fontWeight = "bold", color = "primary" }))
   if miseOutdatedLoading then
-    table.insert(miseBlock, ui.label({ text = "Consultando mise outdated...", color = "on_surface_variant", fontSize = 11 }))
+    table.insert(rows, ui.label({ text = "Consultando mise outdated...", color = "on_surface_variant", fontSize = 11 }))
   elseif miseOutdatedError ~= nil then
-    table.insert(miseBlock, ui.label({ text = miseOutdatedError, color = "error", fontSize = 11, maxLines = 3 }))
-    table.insert(miseBlock, ui.button({ text = "Tentar de novo", onClick = "onMiseReload" }))
+    table.insert(rows, ui.label({ text = miseOutdatedError, color = "error", fontSize = 11, maxLines = 3 }))
+    table.insert(rows, ui.button({ text = "Tentar de novo", onClick = "onMiseReload" }))
   elseif miseOutdated == nil then
-    table.insert(miseBlock, ui.label({ text = "Carregando...", color = "on_surface_variant", fontSize = 11 }))
+    table.insert(rows, ui.label({ text = "Carregando...", color = "on_surface_variant", fontSize = 11 }))
     loadMiseOutdated()
   elseif #miseOutdated == 0 then
-    table.insert(miseBlock, ui.label({ text = "Todas as ferramentas mise estão atualizadas.", color = "on_surface_variant", fontSize = 11 }))
+    table.insert(rows, ui.label({ text = "Todas as ferramentas mise estão atualizadas.", color = "on_surface_variant", fontSize = 11 }))
   else
-    for _, row in ipairs(miseOutdated) do
-      table.insert(miseBlock, ui.row({ align = "center", gap = 10, key = "mise-up-" .. row.name }, {
-        ui.label({ text = row.name, fontSize = 12, flexGrow = 1, maxLines = 1 }),
-        ui.label({ text = row.installed .. " → " .. row.latest, fontSize = 11, color = "on_surface_variant", maxLines = 1 }),
-        ui.button({ glyph = "download", variant = "outline", tooltip = "mise upgrade " .. row.name, onClick = function() onMiseUpgrade(row.name) end }),
-      }))
+    for _, item in ipairs(miseOutdatedItems()) do
+      table.insert(rows, itemRow(item))
     end
   end
-  table.insert(children, ui.column({ gap = 6 }, miseBlock))
+
+  table.insert(children, splitPane(rows, selectionPane({
+    action = updateAction(),
+    status = actionStatus,
+    empty = "Passe o mouse numa ação para ver o comando aqui.",
+  })))
 
   table.insert(children, hint("O rebuild roda num terminal porque o sudo pede sua senha. O flake update também atualiza o lock do Home Manager. O mise upgrade abre um terminal para você acompanhar."))
-  table.insert(children, ui.spacer({ flexGrow = 1 }))
 
   return ui.column({ flexGrow = 1, gap = 10, align = "stretch" }, children)
 end
@@ -1825,12 +2128,11 @@ end
 
 local sysInfo = nil
 local sysLoading = false
-local rollbackArmed = false
 
 local function loadSystemInfo()
   sysLoading = true
   render()
-  local cmd = "readlink -f /run/current-system 2>/dev/null; echo ---; nixos-version 2>/dev/null; echo ---; uname -r; echo ---; uptime -p 2>/dev/null"
+  local cmd = "readlink -f /run/current-system 2>/dev/null; echo ---; nixos-version 2>/dev/null; echo ---; uname -r; echo ---; cut -d' ' -f1 /proc/uptime"
   noctalia.runAsync(cmd, function(res)
     sysLoading = false
     local parts = {}
@@ -1842,11 +2144,18 @@ local function loadSystemInfo()
         parts[idx] = (parts[idx] ~= nil and (parts[idx] .. "\n" .. line)) or line
       end
     end
+    local up = tonumber(((parts[4] or ""):match("^[%d.]+")))
+    local uptime = "?"
+    if up ~= nil then
+      local h = math.floor(up / 3600)
+      local m = math.floor((up % 3600) / 60)
+      uptime = (h > 0 and (h .. "h ") or "") .. m .. "m"
+    end
     sysInfo = {
       generation = parts[1] or "?",
       nixosVersion = parts[2] or "?",
       kernel = parts[3] or "?",
-      uptime = parts[4] or "?",
+      uptime = uptime,
     }
     render()
   end, 60000)
@@ -1859,12 +2168,27 @@ local function infoRow(label, value)
   })
 end
 
+local function systemAction()
+  if selected == nil or selected.kind ~= "sysTask" then
+    return nil
+  end
+  local label = selected.actionLabel
+  local variant = "primary"
+  if selected.key == "sys:rollback" then
+    label = rollbackArmed and selected.armedLabel or selected.actionLabel
+    variant = rollbackArmed and "primary" or "outline"
+  end
+  return { label = label, glyph = selected.actionGlyph, variant = variant, onClick = selected.onClick }
+end
+
 local function renderSystem()
-  local children = { header("Sistema", {}) }
+  local children = { header("Sistema", {
+    ui.button({ glyph = "reload", variant = "ghost", tooltip = "Recarregar info", onClick = "onSysReload" }),
+  }) }
 
   local infoBlock = {}
   if sysLoading then
-    table.insert(infoBlock, ui.label({ text = "Coletando info...", color = "on_surface_variant" }))
+    table.insert(infoBlock, ui.label({ text = "Coletando info...", color = "on_surface_variant", fontSize = 11 }))
   elseif sysInfo ~= nil then
     table.insert(infoBlock, infoRow("Kernel", sysInfo.kernel))
     table.insert(infoBlock, infoRow("NixOS", sysInfo.nixosVersion))
@@ -1873,24 +2197,31 @@ local function renderSystem()
   else
     table.insert(infoBlock, ui.button({ text = "Carregar info", glyph = "reload", onClick = "onSysReload" }))
   end
-  table.insert(children, ui.column({ gap = 6 }, infoBlock))
 
-  table.insert(children, ui.separator({ spacing = 6 }))
+  local rows = {
+    ui.label({ text = "Info do sistema", fontSize = 14, fontWeight = "bold", color = "primary" }),
+    ui.column({
+      gap = 6,
+      padding = 10,
+      paddingH = 12,
+      fill = "surface",
+      radius = 8,
+      border = "outline",
+      borderWidth = 1,
+    }, infoBlock),
+    ui.label({ text = "Tarefas", fontSize = 14, fontWeight = "bold", color = "primary" }),
+  }
+  for _, task in ipairs(systemTasks) do
+    table.insert(rows, itemRow(task))
+  end
 
-  table.insert(children, ui.column({ gap = 8 }, {
-    ui.button({ text = "Listar gerações", glyph = "list-search", onClick = "onSysGenerations" }),
-    ui.button({ text = "Coletar lixo (nix-collect-garbage -d)", glyph = "trash", onClick = "onSysGc" }),
-    ui.button({ text = "Editar configuration.nix", glyph = "edit", onClick = "onSysEditConfig" }),
-    ui.button({
-      text = rollbackArmed and "Confirmar rollback?" or "Rollback para geração anterior",
-      glyph = "restore",
-      variant = rollbackArmed and "primary" or "outline",
-      onClick = "onSysRollback",
-    }),
-  }))
+  table.insert(children, splitPane(rows, selectionPane({
+    action = systemAction(),
+    status = actionStatus,
+    empty = "Passe o mouse numa tarefa para ver o comando aqui.",
+  })))
 
   table.insert(children, hint("Rollback troca o sistema em execução para a geração anterior do perfil system."))
-  table.insert(children, ui.spacer({ flexGrow = 1 }))
 
   return ui.column({ flexGrow = 1, gap = 10, align = "stretch" }, children)
 end
@@ -1996,6 +2327,7 @@ openView = function(id)
   rollbackArmed = false
   hoveredCard = nil
   actionStatus = nil
+  resetSelection()
   if id == "apps" and not appsLoaded and not appsLoading then
     loadApps()
   elseif id == "system" and sysInfo == nil and not sysLoading then
@@ -2207,11 +2539,13 @@ function onSysRollback()
   render()
 end
 
--- Controle externo via `noctalia msg plugin gabrielnathan929/nixdeck:main all <evento> [payload]`:
+-- Controle externo via `noctalia msg plugin gabrielnathan929/hamra-control:main all <evento> [payload]`:
 --   view   <id>        abre uma view (home, apps, install, remove, update, keys, system)
 --   tab    <view>:<tab> troca a aba (install:flatpak | install:nix | install:web | remove:...)
 --   search <origem> <q> busca e mostra o preview (flatpak | nix | mise)
---   select <key>       seleciona um item para o preview (fl:, nx:, ifl:, inx:, web:)
+--   select <key>       seleciona um item para o preview (fl:, nx:, ifl:, inx:, web:, upd:, sys:, mo:)
+--   webapp-create <nome> <url>   cria um web app (mesmo fluxo do botão Criar)
+--   webapp-remove <arquivo>      remove um web app imperativo (ex.: YouTube.desktop)
 function onIpc(event, payload)
   local e = trim(event or "")
   local p = trim(payload or "")
@@ -2259,6 +2593,32 @@ function onIpc(event, payload)
       openView("install")
       miseSearch(q)
     end
+    return
+  end
+
+  if e == "webapp-create" then
+    local name, url = p:match("^(%S+)%s+(%S+)$")
+    if name ~= nil then
+      waName = name
+      waUrl = url
+      instTab = "web"
+      openView("install")
+      createWebApp()
+    end
+    return
+  end
+
+  if e == "webapp-remove" then
+    if not webAppsLoaded then
+      loadWebApps()
+    end
+    for _, item in ipairs(webApps) do
+      if item.kind == "web" and (item.file == p or item.file == p .. ".desktop" or item.name == p) then
+        removeWebApp(item)
+        return
+      end
+    end
+    notifyError("Web app não encontrado: " .. p)
     return
   end
 

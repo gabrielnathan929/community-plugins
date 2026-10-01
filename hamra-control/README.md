@@ -1,4 +1,4 @@
-# NixDeck
+# Hamra Control
 
 Control center for the Hamra (NixOS) config, inside Noctalia. It lists the
 `hamra.programs.*` toggles with their real eval state, groups SSH and GPG key
@@ -10,14 +10,14 @@ tools and exposes common system chores — replacing the old terminal `hamra-men
 
 | Field | Value |
 | --- | --- |
-| ID | `gabrielnathan929/nixdeck` |
+| ID | `gabrielnathan929/hamra-control` |
 | Entries | panel: `main`; launcher provider: `menu` |
-| Launcher Prefix | `/nixdeck` |
+| Launcher Prefix | `/hamra` |
 
 Open the panel with:
 
 ```sh
-noctalia msg panel-toggle gabrielnathan929/nixdeck:main
+noctalia msg panel-toggle gabrielnathan929/hamra-control:main
 ```
 
 Or bind a key to the same command (Hamra binds `Alt+Space` next to the other
@@ -37,7 +37,7 @@ plugin keybinds).
 
 ## Usage
 
-Open the panel from the launcher by typing `/nixdeck` and picking an entry, or
+Open the panel from the launcher by typing `/hamra` and picking an entry, or
 with the IPC command above. The home screen shows the menu as a grid of cards:
 
 - **Aplicativos** — every `hamra.programs.*` boolean as a switch, grouped by
@@ -59,28 +59,35 @@ with the IPC command above. The home screen shows the menu as a grid of cards:
     preview; installing runs `mise use -g <tool>@latest`, which pins the tool to
     always-latest in the global `~/.config/mise/config.toml`. Tools already
     managed by mise are marked *instalado*.
-  - **Web app** — it downloads the site icon (apple-touch-icon, fallback
-    apple-touch-icon.png, Google favicons) and writes a `.desktop` entry
-    launching the browser with `--app=<url>`.
+  - **Web app** — it writes the `.desktop` entry right away (generic icon) so
+    the launcher gets it immediately, then upgrades `Icon=` asynchronously with
+    the site icon (apple-touch-icon, fallback apple-touch-icon.png, Google
+    favicons); it launches the browser with `--app=<url>`.
 - **Remover** — the same tabs for things that are installed: Flatpaks (system
   and user scope, preview via `flatpak info`, system scope goes through a
   terminal with sudo), nix profile packages (preview shows attribute, origin,
   version and store path; removal runs `nix profile remove <name>` and refreshes
   the list), mise tools (preview shows installed and requested version; removal
-  runs `mise unuse -g <tool>` followed by `mise uninstall`), and web apps
-  created by the plugin (removes the `.desktop` and the downloaded icon). Hover
-  or click a row to preview it, then use the red **Remover** button in the pane.
-- **Atualizar** — `nix flake update` + rebuild, or rebuild switch/boot. Below
-  that, a **Ferramentas mise** block lists every mise tool with `installed →
-  latest` from `mise outdated --json` and a one-click **mise upgrade** per tool
-  (each runs in a terminal so you can follow the output).
+  runs `mise unuse -g <tool>` followed by `mise uninstall`), and web apps: the
+  ones created by the plugin (removes the `.desktop` and the downloaded icon)
+  plus the ones declared in Nix (`hamra.webapps`, read from
+  `/etc/hamra/apps.json`) marked with a **nix** badge — those are declarative,
+  so the pane explains how to remove them instead of offering a delete button.
+  Hover or click a row to preview it, then use the red **Remover** button in the
+  pane.
+- **Atualizar** — a list with the system tasks (`nix flake update` + rebuild,
+  rebuild switch, rebuild boot) and every mise tool with `installed → latest`
+  from `mise outdated --json`; hovering a row shows the exact command in the
+  preview pane, where a button runs it (each opens a terminal so you can follow
+  the output).
 - **Chaves** — SSH and GPG grouped: generate an ed25519 key from an e-mail,
   copy public keys, load the agent, edit `~/.ssh/config`; generate/list GPG
   keys, set the git signing key, edit `gpg-agent.conf`.
-- **Sistema** — host info (kernel, NixOS version, uptime, current generation),
-  list generations, `nix-collect-garbage -d`, edit the host's
-  `configuration.nix`, and rollback to the previous generation (two-step
-  confirm).
+- **Sistema** — host info card (kernel, NixOS version, uptime, current
+  generation) plus a task list (list generations, `nix-collect-garbage -d`, edit
+  the host's `configuration.nix`, and rollback to the previous generation with a
+  two-step confirm), each task showing its command and effect in the preview
+  pane before you run it.
 
 Long-running actions (rebuild, `ssh-keygen`, flatpak install, nix profile
 install, `mise use`/`mise upgrade`, GC) spawn in a terminal so you can follow
@@ -91,17 +98,23 @@ the progress — those that need your sudo password keep it out of the panel.
 Every entry accepts events, which is handy for keybinds and scripts:
 
 ```sh
-noctalia msg plugin gabrielnathan929/nixdeck:main all view install
-noctalia msg plugin gabrielnathan929/nixdeck:main all tab install:nix
-noctalia msg plugin gabrielnathan929/nixdeck:main all search nix ripgrep
-noctalia msg plugin gabrielnathan929/nixdeck:main all search mise node
-noctalia msg plugin gabrielnathan929/nixdeck:main all select nx:ripgrep
+noctalia msg plugin gabrielnathan929/hamra-control:main all view install
+noctalia msg plugin gabrielnathan929/hamra-control:main all tab install:nix
+noctalia msg plugin gabrielnathan929/hamra-control:main all search nix ripgrep
+noctalia msg plugin gabrielnathan929/hamra-control:main all search mise node
+noctalia msg plugin gabrielnathan929/hamra-control:main all select nx:ripgrep
+noctalia msg plugin gabrielnathan929/hamra-control:main all select upd:flake
+noctalia msg plugin gabrielnathan929/hamra-control:main all webapp-create Notes https://notes.example.com
+noctalia msg plugin gabrielnathan929/hamra-control:main all webapp-remove Notes.desktop
 ```
 
 `view` takes `home|apps|install|remove|update|keys|system`, `tab` takes
 `<view>:<tab>`, `search` runs a search on `flatpak`, `nix` or `mise`, and
 `select` selects a row by key (`fl:`, `nx:`, `mx:`, `ifl:`, `inx:`, `imx:`,
-`web:`) so the preview loads.
+`web:`, `upd:`, `sys:`, `mo:`, `webnix:`) so the preview loads.
+`webapp-create` creates an imperative web app (same flow as the button) and
+`webapp-remove` deletes one by `.desktop` file or name (Nix-declared web apps
+are not removable this way).
 
 ## Settings
 
