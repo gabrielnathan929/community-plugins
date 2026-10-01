@@ -1,20 +1,18 @@
 id          = "nilsonlinux/rss-notifier"
 name        = "RSS/Atom Notifier"
-version     = "1.0.1"
+version     = "1.2.1"
 plugin_api  = 14
 author      = "Nilsonlinux"
 license     = "MIT"
 icon        = "rss"
-description = "Acompanha feeds RSS/Atom e notifica quando surgem novos itens."
-tags        = ["utility", "indicator"]
+description = "Monitors RSS/Atom feeds and notifies you when new items appear."
+tags        = ["utility", "indicator", "panel", "bar", "service"]
 dependencies = ["xdg-open"]
 
-[[setting]]
-key             = "feed_urls"
-type            = "string_list"
-label_key       = "settings.feed_urls.label"
-description_key = "settings.feed_urls.description"
-default         = []
+# ---------------------------------------------------------------------------
+# Plugin level settings: shared by ALL entries
+# (service + widget). Edited in Settings -> Plugins.
+# ---------------------------------------------------------------------------
 
 [[setting]]
 key             = "refresh_minutes"
@@ -42,19 +40,52 @@ min             = 1
 max             = 50
 advanced        = true
 
+[[setting]]
+key             = "show_feed_images"
+type            = "bool"
+label_key       = "settings.show_feed_images.label"
+description_key = "settings.show_feed_images.description"
+default         = true
+
+# ---------------------------------------------------------------------------
+# Service: runs in the background, without UI, searches and parses feeds
+# ---------------------------------------------------------------------------
+
 [[service]]
 id    = "fetcher"
 entry = "service.luau"
+
+# ---------------------------------------------------------------------------
+# Bar widget: shows the count of unread items
+# ---------------------------------------------------------------------------
 
 [[widget]]
 id    = "badge"
 entry = "widget.luau"
 
+  [[widget.setting]]
+  key             = "glyph"
+  type            = "glyph"
+  label_key       = "settings.glyph.label"
+  description_key = "settings.glyph.description"
+  default         = "rss"
+
+  [[widget.setting]]
+  key             = "show_feed_images"
+  type            = "bool"
+  label_key       = "settings.show_feed_images.label"
+  description_key = "settings.show_feed_images.description"
+  default         = true
+
+# ---------------------------------------------------------------------------
+# Panel: popup with the item list, opened by clicking the widget
+# ---------------------------------------------------------------------------
+
 [[panel]]
-id              = "list"
+id              = "Panel"
 entry           = "panel.luau"
-width           = 360
-height          = 440
-placement       = "attached"
+width           = 540
+height          = 720
+placement       = "attached"   # attached to the bar, near the widget
 position        = "auto"
 open_near_click = true

@@ -32,7 +32,6 @@ local customUrl = noctalia.getConfig("custom_url") or ""
 local customJsonField = noctalia.getConfig("custom_json_field") or "syncedLyrics"
 local pollIntervalMs = tonumber(noctalia.getConfig("poll_interval_ms")) or 500
 local lyricsOffsetMs = tonumber(noctalia.getConfig("lyrics_offset_ms")) or 0
-local displayMode = noctalia.getConfig("display_mode") or "toggle"
 local credentialSignature = ""
 local currentTrack = nil
 local currentEmbeddedLyrics = ""
@@ -312,6 +311,35 @@ local function normalizedSources()
   end
   if #result == 0 then result = { "lrclib", "netease" } end
   return result
+end
+
+local function needsEmbeddedLyrics()
+  if lyricsSource == "mpris" then return true end
+  if lyricsSource ~= "auto" then return false end
+  for _, source in ipairs(normalizedSources()) do
+    if source == "mpris" then return true end
+  end
+  return false
+end
+
+local function splitMetadata(value, separator)
+  local fields = {}
+  local start = 1
+  while true do
+    local finish = value:find(separator, start, true)
+    if not finish then
+      fields[#fields + 1] = value:sub(start)
+      break
+    end
+    fields[#fields + 1] = value:sub(start, finish - 1)
+    start = finish + #separator
+  end
+  return fields
+end
+
+local function trimMetadataField(value)
+  if #value > 16384 then return "" end
+  return value:gsub("^%s+", ""):gsub("%s+$", "")
 end
 
 local function evictCache()
@@ -785,7 +813,12 @@ end
 local function poll()
   if pollInFlight then return end
   pollInFlight = true
-  local cmd = [[playerctl --all-players metadata --format $'{{playerInstance}}\x1f{{playerName}}\x1f{{lc(status)}}\x1f{{title}}\x1f{{artist}}\x1f{{album}}\x1f{{position}}\x1f{{mpris:length}}\x1f{{mpris:artUrl}}\x1f{{mpris:trackid}}\x1f{{xesam:url}}\x1f{{xesam:asText}}\x1e' 2>/dev/null]]
+  -- xesam:asText can contain an entire lyric file. Only request it when it
+  -- is configured as a lyric source; otherwise it needlessly inflates every
+  -- poll result and can exhaust the async callback CPU budget.
+  local embeddedFormat = needsEmbeddedLyrics() and "{{xesam:asText}}" or ""
+  local cmd = [[timeout 3s playerctl --all-players metadata --format "$(printf '{{playerInstance}}\037{{playerName}}\037{{lc(status)}}\037{{title}}\037{{artist}}\037{{album}}\037{{position}}\037{{mpris:length}}\037{{mpris:artUrl}}\037{{mpris:trackid}}\037{{xesam:url}}\037]]
+    .. embeddedFormat .. [[\036')" 2>/dev/null]]
 
   local started = noctalia.runAsync(cmd, function(r)
     pollInFlight = false
@@ -793,15 +826,19 @@ local function poll()
       clearPlayerState()
       return
     end
+    if #r.stdout > 131072 then
+      clearPlayerState()
+      return
+    end
 
     local players = {}
     local fieldSeparator = string.char(31)
     local recordSeparator = string.char(30)
-    for record in (r.stdout .. recordSeparator):gmatch("(.-)" .. recordSeparator) do
+    for _, record in ipairs(splitMetadata(r.stdout, recordSeparator)) do
       if record ~= "" then
-        local parts = {}
-        for field in (record .. fieldSeparator):gmatch("(.-)" .. fieldSeparator) do
-          parts[#parts + 1] = field:gsub("^%s+", ""):gsub("%s+$", "")
+        local parts = splitMetadata(record, fieldSeparator)
+        for index, field in ipairs(parts) do
+          parts[index] = trimMetadataField(field)
         end
         local player = {
           instance = parts[1] or "",
@@ -876,13 +913,7 @@ local function poll()
       noctalia.state.set("playing", playing)
 
       local cached = cache[tk]
-      if displayMode == "track" then
-        noctalia.state.set("lyrics", nil)
-        noctalia.state.set("lyrics_source_used", nil)
-        candidateCache[tk] = nil
-        selectedCandidateCache[tk] = nil
-        publishCandidates(tk)
-      elseif cached then
+      if cached then
         noctalia.state.set("lyrics", cached)
         noctalia.state.set("lyrics_source_used", "cache")
         publishCandidates(tk)
@@ -930,7 +961,6 @@ function onConfigChanged()
   local nextSources = noctalia.getConfig("lyrics_sources") or lyricsSources
   local nextPollInterval = tonumber(noctalia.getConfig("poll_interval_ms")) or 500
   local nextOffset = tonumber(noctalia.getConfig("lyrics_offset_ms")) or 0
-  local nextDisplayMode = noctalia.getConfig("display_mode") or "toggle"
   local nextCredentialSignature = table.concat({
     noctalia.getConfig("spotify_sp_dc") or "",
     noctalia.getConfig("spotify_access_token") or "",
@@ -948,7 +978,6 @@ function onConfigChanged()
   local sourceChanged = nextSource ~= lyricsSource or nextUrl ~= customUrl or nextField ~= customJsonField
     or table.concat(nextSources, "\n") ~= table.concat(lyricsSources, "\n")
     or nextCredentialSignature ~= credentialSignature
-    or nextDisplayMode ~= displayMode
   local playersChanged = table.concat(nextAllowlist, "\n") ~= table.concat(playerAllowlist, "\n")
     or table.concat(nextBlocklist, "\n") ~= table.concat(playerBlocklist, "\n")
   lyricsSource = nextSource
@@ -957,7 +986,6 @@ function onConfigChanged()
   lyricsSources = nextSources
   pollIntervalMs = math.max(100, nextPollInterval)
   lyricsOffsetMs = nextOffset
-  displayMode = nextDisplayMode
   credentialSignature = nextCredentialSignature
   playerAllowlist = nextAllowlist
   playerBlocklist = nextBlocklist
@@ -976,7 +1004,7 @@ function onConfigChanged()
     selectedCandidateCache = {}
     noctalia.state.set("lyrics", nil)
     publishCandidates(trackKey(currentTrack))
-    if displayMode ~= "track" then fetchLyricsNetEase(currentTrack, currentEmbeddedLyrics) end
+    fetchLyricsNetEase(currentTrack, currentEmbeddedLyrics)
   end
 end
 

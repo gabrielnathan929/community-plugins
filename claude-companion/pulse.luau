@@ -244,14 +244,14 @@ local function apply(s)
   render()
 end
 
--- Click the dot to show the answer panel — the full-length surface for /claude ?
--- quick-ask answers (the toast only carries a preview; claude.luau publishes the
--- complete text to "claude.answer" and answer.luau renders it scrollable).
+-- Click the dot to ask a one-off question (the ask panel); the answer panel opens
+-- on its own when the reply lands. Left, not middle: Noctalia binds middle click on
+-- every bar widget to its settings, which swallows it before onMiddleClick runs.
 -- panel-OPEN, not -toggle: open is idempotent, so it survives the click handler
 -- firing more than once per click (a toggle nets out to closed again — click
 -- appeared dead in live testing). Dismiss is click-outside/Esc, panel idiom.
 function onClick()
-  if not noctalia.runAsync("noctalia msg panel-open 'lowcache/claude-companion:answer'") then
+  if not noctalia.runAsync("noctalia msg panel-open 'lowcache/claude-companion:ask'") then
     noctalia.notifyError(tr("pulse.title"), tr("pulse.panel_launch_failed"))
   end
 end

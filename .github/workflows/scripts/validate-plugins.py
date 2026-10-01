@@ -6,6 +6,7 @@ import argparse
 import json
 import math
 import re
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -56,6 +57,7 @@ ALLOWED_TAGS = {
     "system",
     "theming",
     "time",
+    "umbriel",
     "utility",
     "video",
     "void",
@@ -97,6 +99,11 @@ WEBP_MAGIC_FORMAT = b"WEBP"
 # Enough of the file to cover the RIFF header plus the first chunk header and the widest
 # dimension field of any WebP variant.
 WEBP_HEADER_BYTES = 32
+# Every clone, CI run, and install checks out every file a plugin ships, so one submission's file
+# count is a repo-wide cost. The largest plugin on main ships 59 files; a generated per-frame
+# animation pack shipped 2530. 200 leaves real asset sets over 3x headroom while rejecting dumps
+# that belong in one archive or in the user's cache directory.
+MAX_PLUGIN_FILES = 200
 
 ROOT_STRING_FIELDS = (
     "id",
@@ -1350,6 +1357,78 @@ class Validator:
             if path.is_symlink():
                 self.add_error(manifest_path, f"'{rel(self.root, path)}' is a symlink; plugins ship real files")
 
+    def validate_file_count(self, manifest_path: Path, plugin_dir: Path) -> None:
+        count = sum(1 for path in plugin_dir.rglob("*") if path.is_file())
+        if count > MAX_PLUGIN_FILES:
+            self.add_error(
+                manifest_path,
+                f"plugin directory ships {count} files; the limit is {MAX_PLUGIN_FILES} "
+                "(every clone, CI run, and install checks out every file - ship generated asset "
+                "packs as one archive or generate them into the user's cache directory on first run)",
+            )
+
+    def git_index_entries(self) -> list[tuple[str, str]] | None:
+        # Returns (mode, path) for every tracked entry, or None when this is not the repository
+        # checkout (unit tests validate detached temporary directories) or git is unavailable.
+        try:
+            probe = subprocess.run(
+                ["git", "-C", str(self.root), "rev-parse", "--show-toplevel"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError:
+            return None
+        if probe.returncode != 0:
+            return None
+        try:
+            toplevel = Path(probe.stdout.strip()).resolve()
+        except OSError:
+            return None
+        if toplevel != self.root:
+            return None
+
+        try:
+            listed = subprocess.run(
+                ["git", "-C", str(self.root), "-c", "core.quotePath=false", "ls-files", "--stage"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError:
+            return None
+        if listed.returncode != 0:
+            return None
+
+        entries: list[tuple[str, str]] = []
+        for line in listed.stdout.splitlines():
+            metadata, separator, path = line.partition("\t")
+            if not separator:
+                continue
+            entries.append((metadata.split(" ", 1)[0], path))
+        return entries
+
+    def validate_git_objects(self) -> None:
+        # Plugins ship as plain files committed in this repository. A gitlink (mode 160000) or a
+        # committed .gitmodules points at content stored elsewhere: a fresh clone checks out an
+        # empty plugin directory, the shell cannot install it, and reviewers cannot inspect it.
+        entries = self.git_index_entries()
+        if entries is None:
+            return
+
+        for mode, path in entries:
+            if mode == "160000":
+                self.add_error(
+                    self.root / path,
+                    "is a git submodule (mode 160000); plugins ship plain files committed in this "
+                    "repository, so commit the plugin's files instead of a submodule",
+                )
+            elif Path(path).name == ".gitmodules":
+                self.add_error(
+                    self.root / path,
+                    "declares git submodules; plugins ship plain files committed in this repository",
+                )
+
     def validate_manifest(self, manifest_path: Path) -> None:
         manifest = self.load_manifest(manifest_path)
         if manifest is None:
@@ -1365,6 +1444,7 @@ class Validator:
         self.validate_readme(plugin_dir, manifest)
         self.validate_luau_api(plugin_dir)
         self.validate_no_symlinks(manifest_path, plugin_dir)
+        self.validate_file_count(manifest_path, plugin_dir)
 
         if "setting" in manifest:
             self.validate_settings(
@@ -1389,6 +1469,7 @@ class Validator:
 
     def validate(self) -> int:
         self.validate_layout()
+        self.validate_git_objects()
         manifests = sorted(self.root.glob("*/plugin.toml"))
         for manifest_path in manifests:
             self.validate_manifest(manifest_path)

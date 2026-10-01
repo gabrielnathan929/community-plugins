@@ -58,13 +58,13 @@ Anything that looks like it is hiding what it does will be rejected, regardless 
 
 ## Writing a plugin
 
-The [plugin development docs](https://docs.noctalia.dev/v5/plugins/development/) are the reference: the
-[manifest](https://docs.noctalia.dev/v5/plugins/development/manifest/), the
-[entry types](https://docs.noctalia.dev/v5/plugins/development/entries/) (`[[widget]]`, `[[panel]]`, `[[shortcut]]`,
+The [plugin development docs](https://docs.noctalia.dev/noctalia/plugins/development/) are the reference: the
+[manifest](https://docs.noctalia.dev/noctalia/plugins/development/manifest/), the
+[entry types](https://docs.noctalia.dev/noctalia/plugins/development/entries/) (`[[widget]]`, `[[panel]]`, `[[shortcut]]`,
 `[[service]]`, `[[desktop_widget]]`, `[[launcher_provider]]`), the
-[declarative UI](https://docs.noctalia.dev/v5/plugins/development/declarative-ui/) vocabulary, the
-[runtime API](https://docs.noctalia.dev/v5/plugins/development/runtime-api/), and the
-[workflow](https://docs.noctalia.dev/v5/plugins/development/workflow/) for developing and testing locally.
+[declarative UI](https://docs.noctalia.dev/noctalia/plugins/development/declarative-ui/) vocabulary, the
+[runtime API](https://docs.noctalia.dev/noctalia/plugins/development/runtime-api/), and the
+[workflow](https://docs.noctalia.dev/noctalia/plugins/development/workflow/) for developing and testing locally.
 
 The fastest start is to read
 [`noctalia/example`](https://github.com/noctalia-dev/official-plugins/tree/main/example) in the official repo. It
@@ -121,7 +121,10 @@ official plugins:
 CI derives ids, panel commands, launcher prefixes, dependencies, and whether settings exist from `plugin.toml`. Its
 error messages show the exact missing value, while maintainers review the usefulness and accuracy of the prose.
 
-### Translations
+> [!WARNING]
+> **Editing existing translations must be done on [Noctalia Translate](https://i18n.noctalia.dev)**, the single
+> source of truth for all translated strings. Do not edit the strings of an existing translation in the locale JSON
+> files here: they will most likely be overwritten on the next i18n pull.
 
 Write `translations/en.json` only. Every `label_key` and `description_key` in your manifest must resolve to a key in
 it, and CI checks this. Do not add machine-translated locales; other languages are handled separately.
@@ -159,6 +162,9 @@ Open a PR against `main`. CI validates your manifest, entry scripts, required fi
 - `plugin_api` is the oldest Noctalia plugin API level the plugin requires. Use the current documented level for a new
   plugin, and increase it only when the plugin adopts a capability from a newer API level.
 - `description` is concise catalog copy, limited to 120 characters. Put feature details in the plugin's README.
+- A plugin directory ships at most 200 files. Every clone, CI run, and install checks out every file, so ship
+  generated asset packs (animation frames, sprite sheets) as one archive, or generate them into the user's cache
+  directory on first run.
 - `license` is set in `plugin.toml`. You keep the copyright on your plugin; if it is not MIT, put a `LICENSE` file in
   your plugin directory. There is no repo-wide license covering contributed plugins.
 - Screenshots or a short video for anything with a visual surface.

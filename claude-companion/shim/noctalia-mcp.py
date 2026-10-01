@@ -16,13 +16,12 @@ via --mcp-config; no daemon to babysit.
 Tool set is the low/medium perception tier only — high-tier senses
 (clipboard/screen/files) stay gated until a local backend lands.
 """
-import datetime
 import json
 import os
 import re
 import subprocess
 import sys
-import tempfile
+import time
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_INFO = {"name": "noctalia-mcp", "version": "0.1.0"}
@@ -208,64 +207,6 @@ def _get_window(a):
     return json.dumps(view) if view else "error: no focused window"
 
 
-def _remember(a):
-    """Persist a durable fact to GLOBAL memory's inbox; memd distills ~/.memory.
-
-    The membrane (decision #25): ephemeral senses -> noctalia.state; durable
-    learnings -> global memd. This is the durable side. Notes are routed:global
-    so memd's curator files them into the system-wide store, not a project."""
-    # Coerce: a model may send a non-string (number/list) — str() keeps the
-    # handler (and the server) from raising on .strip()/.lower().
-    text = str(a.get("text") or "").strip()
-    if not text:
-        return "error: 'text' is required"
-    slug = re.sub(r"[^a-z0-9]+", "-", str(a.get("topic") or "note").lower()).strip("-") or "note"
-    mem = os.path.expanduser("~/.memory")
-    inbox = os.path.join(mem, "inbox")
-    body = (
-        f"---\nrouted: global\ntopic: {slug}\n"
-        f"date: {datetime.date.today()}\nsource: noctalia-mcp/remember\n---\n\n"
-        f"{text}\n"
-    )
-    try:
-        os.makedirs(inbox, exist_ok=True)
-        # Concurrency: every Claude session runs its own shim, and the curator
-        # (memd) reads/clears this inbox in parallel. Two guards:
-        #  1) Unique name — microsecond timestamp + PID, so simultaneous notes
-        #     from different sessions never collide (second-resolution did).
-        #  2) Atomic publish — write a temp file OUTSIDE the inbox, then
-        #     os.replace() it in. A sweep either sees the whole note or not at
-        #     all; it can never read a half-written file mid-write.
-        #  3) Crash durability — fsync the file before publish, then fsync the
-        #     inbox dir after the rename. Without both, a power loss/panic can
-        #     leave a flushed file whose directory entry never landed (lost
-        #     note) or a renamed entry pointing at unflushed data. Cheap
-        #     insurance; matters for an alpha shell on a crash-prone desktop.
-        ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-        final = os.path.join(inbox, f"{ts}-{slug}-{os.getpid()}.md")
-        fd, tmp = tempfile.mkstemp(dir=mem, prefix=".remember-", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w") as f:
-                f.write(body)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, final)
-            dfd = os.open(inbox, os.O_RDONLY)
-            try:
-                os.fsync(dfd)
-            finally:
-                os.close(dfd)
-        except BaseException:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
-        return f"remembered -> {final}"
-    except OSError as e:
-        return f"error: {e}"
-
-
 # ── additional senses (read-only) ────────────────────────────────────────────
 def _get_power(a):
     """Battery level/status + AC state, as JSON. battery=null if none present."""
@@ -365,6 +306,76 @@ def _set_wallpaper(a):
     return sh(argv)
 
 
+# ── presence (the agent's own voice) ──────────────────────────────────────────
+# Every other signal about Claude is INFERRED: hooks fire on lifecycle edges and the
+# service deduces a state from them. This is the one channel where the agent says what
+# it is doing in its own words, and the surfaces show that instead of a guess.
+#
+# The message goes to a file rather than into the IPC payload because a payload must
+# be a single space-free token (PROTOCOL.md "Transport") and prose is neither. The
+# dispatch is a bare poke; the service reads the file, and an ABSENT file means no
+# message — so clearing is an unlink, not a sentinel value.
+PRESENCE_STATES = {
+    "idle", "turn_start", "text", "tool_start", "needs_attention", "turn_end", "error",
+}
+
+
+def _presence_path():
+    """None when XDG_RUNTIME_DIR is unset: same stance as the consent gate, which
+    refuses to fall back to a world-writable /tmp for anything it later trusts."""
+    base = os.environ.get("XDG_RUNTIME_DIR")
+    if not base or not os.path.isdir(base):
+        return None
+    d = os.path.join(base, "claude-companion")
+    try:
+        os.makedirs(d, mode=0o700, exist_ok=True)
+    except OSError:
+        return None
+    return os.path.join(d, "presence")
+
+
+def _poke():
+    sh(["noctalia", "msg", "plugin",
+        "lowcache/claude-companion:pulse-svc", "all", "presence"])
+
+
+def _set_presence(a):
+    text = str(a.get("message") or "").strip()
+    if not text:
+        return "error: 'message' is required"
+    # One glanceable line. A paragraph on a bar tooltip is not presence, it is a wall.
+    text = " ".join(text.split())[:120]
+    state = str(a.get("state") or "").strip()
+    if state and state not in PRESENCE_STATES:
+        return "error: 'state' must be one of " + ", ".join(sorted(PRESENCE_STATES))
+    path = _presence_path()
+    if not path:
+        return "error: no XDG_RUNTIME_DIR; presence unavailable"
+    # `session` is reserved: MCP servers are not handed the Claude session id, so
+    # presence is currently a rollup-level fact. Writing the field now means adding
+    # per-session attribution later is not a format change.
+    row = {"message": text, "state": state, "session": "", "at": int(time.time())}
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(row, f)
+    except OSError as e:
+        return f"error: {e}"
+    _poke()
+    return "presence set: " + text
+
+
+def _clear_presence(_a):
+    path = _presence_path()
+    if path:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    _poke()
+    return "presence cleared"
+
+
 # name -> (description, inputSchema properties, handler). Commands verified against
 # noctalia 5.0.0 (`noctalia msg --help`); window/workspace ops route through the
 # compositor abstraction above (niri / Hyprland / Sway).
@@ -405,18 +416,27 @@ TOOLS = {
         {},
         _get_processes,
     ),
-    # ── memory (durable, cross-session) ───────────────────────────────────────
-    "remember": (
-        "Persist a durable fact, preference, or system detail to GLOBAL memory "
-        "(system-wide, cross-project) so future sessions know it. Use for things "
-        "true beyond the current task; memd distills it into ~/.memory.",
+    # ── presence (the agent's own voice) ──────────────────────────────────────
+    "set_presence": (
+        "Say what you are doing right now, in your own words, on the user's desktop. "
+        "Shows on the bar tooltip, the presence orb and any pending permission prompt, "
+        "so they can see your reasoning without reading the terminal. Call it when you "
+        "start something slow, change direction, or get stuck. One short line.",
         {
-            "text": {"type": "string", "required": True,
-                     "description": "The durable fact/preference, 1-2 sentences."},
-            "topic": {"type": "string",
-                      "description": "Short kebab-case slug for the note (optional)."},
+            "message": {"type": "string", "required": True,
+                        "description": "One glanceable line, e.g. 'reading the auth "
+                                       "middleware to find where the token expires'."},
+            "state": {"type": "string",
+                      "description": "Optional lifecycle hint: idle, turn_start, text, "
+                                     "tool_start, needs_attention, turn_end, error."},
         },
-        _remember,
+        _set_presence,
+    ),
+    "clear_presence": (
+        "Drop the presence line you set with set_presence. Call it when the thing you "
+        "described is finished and nothing has replaced it.",
+        {},
+        _clear_presence,
     ),
     # ── hands ─────────────────────────────────────────────────────────────────
     "notify": (

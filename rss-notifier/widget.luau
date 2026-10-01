@@ -1,15 +1,19 @@
 -- widget.luau
--- Widget de barra: icone RSS com uma pilula colorida (badge) de itens nao
--- lidos encostada no lado esquerdo, publicada pelo service via noctalia.state.
+-- Bar widget: RSS glyph with a colored pill (badge) of unread items next to
+-- it on the left side, published by the service via noctalia.state.
 
 local unread = 0
+
+local function tr(key)
+  return noctalia.tr(key)
+end
 
 local function render()
   local children = {}
 
   if unread > 0 then
-    -- pilula: um container com fundo colorido e cantos arredondados, com o
-    -- numero dentro - o mais perto que a API declarativa chega de um "badge"
+    -- pill: a container with a colored background and rounded corners, with
+    -- the number inside - the closest the declarative API gets to a "badge"
     table.insert(children, ui.row({
       fill     = "primary",
       radius   = 8,
@@ -22,12 +26,12 @@ local function render()
     }))
   end
 
-  table.insert(children, ui.glyph({ name = "rss", size = 14 }))
+  table.insert(children, ui.glyph({ name = noctalia.getConfig("glyph") or "rss", size = 14 }))
 
   local container = barWidget.isVertical() and ui.column or ui.row
   barWidget.render(container({ gap = 4, align = "center" }, children))
 
-  barWidget.setTooltip(unread > 0 and (tostring(unread) .. " novo(s) item(ns) nos feeds") or "Nenhum item novo")
+  barWidget.setTooltip(unread > 0 and (tostring(unread) .. " " .. tr("widget.tooltip_unread_suffix")) or tr("widget.tooltip_none"))
 end
 
 noctalia.state.watch("unread", function(value)
@@ -38,20 +42,24 @@ end)
 render()
 
 function update()
-  noctalia.setUpdateInterval(5000) -- so mantem o widget "vivo"; os dados reais vem do state
+  noctalia.setUpdateInterval(5000) -- just keeps the widget "alive"; real data comes from state
+end
+
+function onConfigChanged()
+  render() -- picks up the new glyph when the user changes the icon in the widget settings
 end
 
 function onClick()
-  -- abre/fecha a janelinha com a lista de itens; o proprio painel marca
-  -- como lido (zera o badge) quando e aberto, via IPC pro service
-  noctalia.togglePanel("nilsonlinux/rss-notifier:list")
+  -- opens/closes the item list popup; the panel itself marks everything as
+  -- read (resets the badge) when it's opened, via IPC to the service
+  noctalia.togglePanel("nilsonlinux/rss-notifier:Panel")
 end
 
 function onRightClick()
-  -- clique direito: forca uma nova checagem imediata dos feeds,
-  -- enviando um evento IPC para a entry [[service]] (que e um singleton, alvo "all")
+  -- right click: forces an immediate feed check by sending an IPC event to
+  -- the [[service]] entry (which is a singleton, target "all")
   noctalia.runAsync("noctalia msg plugin nilsonlinux/rss-notifier:fetcher all refresh")
-  noctalia.notify("RSS/Atom Notifier", "Atualizando feeds...")
+  noctalia.notify(tr("notify.title"), tr("notify.refreshing"))
 end
 
 function onIpc(event, payload)

@@ -145,11 +145,11 @@
       "description": "Light up each character as the song progresses (karaoke style).",
       "label": "Per-character gradient"
     },
-    "hide_when_paused": {
-      "label": "Hide when paused"
-    },
     "hide_when_no_lyrics": {
       "label": "Hide when no lyrics"
+    },
+    "hide_when_paused": {
+      "label": "Hide when paused"
     },
     "inactive_color": {
       "description": "Color used for upcoming lyrics, paused playback, and secondary lines.",
@@ -295,6 +295,15 @@
     "spotify_sp_dc": {
       "description": "Optional manually supplied Spotify web cookie. Stored as a normal plugin setting; never written to logs.",
       "label": "Spotify sp_dc"
+    },
+    "text_alignment": {
+      "description": "Align lyrics and track information within the fixed lyric width.",
+      "label": "Text alignment",
+      "options": {
+        "center": "Center",
+        "left": "Left",
+        "right": "Right"
+      }
     },
     "translation_language": {
       "description": "Preferred translated-lyric language when supported by the source.",

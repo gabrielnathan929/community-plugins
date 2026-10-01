@@ -1,41 +1,48 @@
 -- service.luau
--- Servico headless: busca cada feed configurado, extrai itens (RSS <item> ou
--- Atom <entry>), compara com o que ja foi visto, notifica o que for novo e
--- publica a contagem de nao-lidos em noctalia.state para o widget consumir.
+-- Headless service: fetches each configured feed, extracts items (RSS <item>
+-- or Atom <entry>), compares against what's already been seen, notifies on
+-- new items, and publishes the unread count in noctalia.state for the widget.
 
-local seen = {}          -- { [feedUrl] = { ids = { [itemId]=true, ... }, order = { id1, id2, ... } } }
+local seen = {}           -- { [feedUrl] = { ids = { [itemId]=true, ... }, order = { id1, id2, ... } } }
 local unread = 0
-local recentItems = {}   -- lista dos itens mais recentes, mais novo primeiro
+local recentItems = {}    -- list of the most recent items, newest first
+local feeds = {}          -- subscribed feed URLs, managed from the panel (the old feed_urls setting is gone)
+local faviconCache = {}   -- { [domain] = localFilePath | false } - avoids re-downloading the same site's favicon
+local feedImageCache = {} -- { [feedUrl] = localFilePath | false } - the FEED's own photo/logo (the "foto do feed")
 local dataPath = nil
 
-local MAX_RECENT_ITEMS  = 50
-local MAX_SEEN_PER_FEED = 300 -- limite de ids "ja vistos" guardados por feed (evita crescer sem fim)
+local function tr(key)
+  return noctalia.tr(key)
+end
 
--- Limites para manter o parsing rapido o suficiente para o orcamento de CPU
--- (muito apertado) do callback assincrono.
-local MAX_BODY_BYTES  = 8000   -- so olhamos os primeiros ~8KB do corpo do feed
-local MAX_ITEM_BYTES  = 400    -- corta cada bloco <item>/<entry> antes de extrair tags
-local MAX_ITEMS       = 8      -- para de processar itens depois desse tanto
+local MAX_RECENT_ITEMS  = 50
+local MAX_SEEN_PER_FEED = 300 -- cap on "already seen" ids kept per feed (prevents unbounded growth)
+
+-- Limits to keep parsing fast enough for the (very tight) CPU budget of the
+-- async callback.
+local MAX_BODY_BYTES  = 8000   -- only look at the first ~8KB of the feed body
+local MAX_ITEM_BYTES  = 3000   -- trim each <item>/<entry> block before extracting tags. High enough that the item's own image (enclosure/media/<img> deep inside <description>/<content>) is not cut off when the title/description are long.
+local MAX_ITEMS       = 8      -- stop processing items after this many
 
 local function isUtf8Continuation(b)
   return b ~= nil and b >= 0x80 and b < 0xC0
 end
 
--- Corta a string em ate n bytes, mas nunca no meio de um caractere UTF-8
--- multibyte (acentos, aspas curvas, emoji, etc.) - cortar assim gera bytes
--- invalidos que o renderizador de texto (Pango) rejeita, deixando labels
--- (e por tabela o painel inteiro) sem aparecer.
+-- Cuts the string to at most n bytes, but never in the middle of a multibyte
+-- UTF-8 character (accents, curly quotes, emoji, etc.) - cutting there
+-- produces invalid bytes that the text renderer (Pango) rejects, leaving
+-- labels (and by extension the whole panel) blank.
 local function truncate(s, n)
   if not s or #s <= n then
     return s
   end
   local cut = n
-  -- recua enquanto o byte da posicao for byte de continuacao (0x80-0xBF)
+  -- back off while the byte at this position is a continuation byte (0x80-0xBF)
   while cut > 0 and isUtf8Continuation(s:byte(cut)) do
     cut = cut - 1
   end
-  -- se o byte que sobrou for o inicio de uma sequencia multibyte, so mantem
-  -- se ela couber inteira dentro do limite n; senao descarta ele tambem
+  -- if the remaining byte is the start of a multibyte sequence, only keep it
+  -- if the whole sequence fits within the limit n; otherwise drop it too
   local b = cut > 0 and s:byte(cut) or nil
   if b and b >= 0xC0 then
     local seqLen = (b >= 0xF0 and 4) or (b >= 0xE0 and 3) or 2
@@ -46,10 +53,9 @@ local function truncate(s, n)
   return s:sub(1, cut)
 end
 
--- Mesma logica de "nao corte no meio de UTF-8", mas trabalhando so com
--- indices/bytes individuais (sem materializar substrings gigantes) - usado
--- para limitar o tamanho de um bloco <item> sem copiar o conteudo inteiro
--- antes de cortar.
+-- Same "don't cut mid-UTF-8" logic, but working only with individual
+-- indices/bytes (without materializing giant substrings) - used to bound the
+-- size of an <item> block without copying the whole content before cutting.
 local function safeCutEnd(xml, endPos, minPos)
   local pos = endPos
   while pos > minPos do
@@ -58,23 +64,23 @@ local function safeCutEnd(xml, endPos, minPos)
       break
     end
     if b < 0x80 then
-      break -- ascii, seguro
+      break -- ascii, safe
     elseif b >= 0xC0 then
       local seqLen = (b >= 0xF0 and 4) or (b >= 0xE0 and 3) or 2
       if pos + seqLen - 1 <= endPos then
-        break -- sequencia cabe inteira ate endPos, seguro
+        break -- the whole sequence fits up to endPos, safe
       end
-      pos = pos - 1 -- nao cabe inteira, descarta o lead byte tambem
+      pos = pos - 1 -- doesn't fit whole, drop the lead byte too
     else
-      pos = pos - 1 -- byte de continuacao, ainda no meio da sequencia
+      pos = pos - 1 -- continuation byte, still mid-sequence
     end
   end
   return pos
 end
 
--- Testa se um item ja foi visto e, se nao, marca como visto - com limite de
--- tamanho por feed (descarta o mais antigo quando passa do limite), para
--- nunca deixar a estrutura "seen" crescer sem fim (e estourar o encode/save).
+-- Checks whether an item has already been seen and, if not, marks it as
+-- seen - with a per-feed size cap (drops the oldest once over the limit), so
+-- the "seen" structure never grows without bound (and blows up encode/save).
 local function markSeen(url, id)
   local bucket = seen[url]
   if not bucket or not bucket.ids then
@@ -82,7 +88,7 @@ local function markSeen(url, id)
     seen[url] = bucket
   end
   if bucket.ids[id] then
-    return false -- ja visto
+    return false -- already seen
   end
   bucket.ids[id] = true
   table.insert(bucket.order, id)
@@ -90,7 +96,7 @@ local function markSeen(url, id)
     local oldest = table.remove(bucket.order, 1)
     bucket.ids[oldest] = nil
   end
-  return true -- era novo
+  return true -- was new
 end
 
 local function isFirstRunForFeed(url)
@@ -98,10 +104,54 @@ local function isFirstRunForFeed(url)
   return not bucket or not bucket.order or #bucket.order == 0
 end
 
--- Remove/descarta qualquer sequencia de bytes que NAO seja UTF-8 valido.
--- Necessario porque alguns feeds vem com o charset errado no servidor (bytes
--- Latin-1/CP-1252 marcados como UTF-8, por exemplo) - nesse caso nem um corte
--- perfeito resolve, o defeito ja vem no texto original.
+-- Converts a Unicode codepoint to the equivalent UTF-8 byte sequence.
+local function codepointToUtf8(cp)
+  if not cp or cp < 0 then
+    return ""
+  elseif cp < 0x80 then
+    return string.char(cp)
+  elseif cp < 0x800 then
+    return string.char(0xC0 + math.floor(cp / 0x40), 0x80 + (cp % 0x40))
+  elseif cp < 0x10000 then
+    return string.char(
+      0xE0 + math.floor(cp / 0x1000),
+      0x80 + (math.floor(cp / 0x40) % 0x40),
+      0x80 + (cp % 0x40)
+    )
+  else
+    return string.char(
+      0xF0 + math.floor(cp / 0x40000),
+      0x80 + (math.floor(cp / 0x1000) % 0x40),
+      0x80 + (math.floor(cp / 0x40) % 0x40),
+      0x80 + (cp % 0x40)
+    )
+  end
+end
+
+-- CP-1252 diverges from Latin-1 exactly in the 0x80-0x9F byte range: in
+-- Latin-1 those are useless control codes, but in CP-1252 (the de-facto more
+-- common charset in mislabeled feeds) they're curly quotes, dashes, ellipsis, etc.
+local CP1252_HIGH = {
+  [0x80] = 0x20AC, [0x82] = 0x201A, [0x83] = 0x0192, [0x84] = 0x201E,
+  [0x85] = 0x2026, [0x86] = 0x2020, [0x87] = 0x2021, [0x88] = 0x02C6,
+  [0x89] = 0x2030, [0x8A] = 0x0160, [0x8B] = 0x2039, [0x8C] = 0x0152,
+  [0x8E] = 0x017D, [0x91] = 0x2018, [0x92] = 0x2019, [0x93] = 0x201C,
+  [0x94] = 0x201D, [0x95] = 0x2022, [0x96] = 0x2013, [0x97] = 0x2014,
+  [0x98] = 0x02DC, [0x99] = 0x2122, [0x9A] = 0x0161, [0x9B] = 0x203A,
+  [0x9C] = 0x0153, [0x9E] = 0x017E, [0x9F] = 0x0178,
+}
+
+-- Converts a single Latin-1/CP-1252 byte (0x80-0xFF) to the equivalent UTF-8
+-- sequence - used as a fallback when a byte doesn't form valid UTF-8.
+local function latin1ByteToUtf8(b)
+  local cp = CP1252_HIGH[b] or b -- 0xA0-0xFF: Latin-1 and CP-1252 match
+  return codepointToUtf8(cp)
+end
+
+-- Fixes/normalizes text to valid UTF-8. When a byte doesn't form a valid
+-- UTF-8 sequence, assumes Latin-1/CP-1252 (a wrong-charset case common in
+-- older feeds, like Brazilian news sites) and CONVERTS instead of dropping -
+-- so the accent shows up correctly instead of vanishing.
 local function sanitizeUtf8(s)
   if not s then
     return s
@@ -123,7 +173,7 @@ local function sanitizeUtf8(s)
       elseif b >= 0xC2 then
         seqLen = 2
       else
-        seqLen = 0 -- lead byte invalido (0x80-0xC1)
+        seqLen = 0 -- invalid lead byte (0x80-0xC1)
       end
 
       local valid = seqLen > 0 and (i + seqLen - 1) <= len
@@ -141,7 +191,8 @@ local function sanitizeUtf8(s)
         out[#out + 1] = s:sub(i, i + seqLen - 1)
         i = i + seqLen
       else
-        i = i + 1 -- byte invalido: descarta so ele e continua
+        out[#out + 1] = latin1ByteToUtf8(b) -- convert instead of dropping
+        i = i + 1
       end
     end
   end
@@ -149,7 +200,7 @@ local function sanitizeUtf8(s)
 end
 
 -- ---------------------------------------------------------------------------
--- Persistencia (sobrevive a restarts do plugin/shell)
+-- Persistence (survives plugin/shell restarts)
 -- ---------------------------------------------------------------------------
 
 local function loadState()
@@ -165,10 +216,13 @@ local function loadState()
     if ok and type(decoded) == "table" then
       seen        = decoded.seen or {}
       recentItems = decoded.recentItems or {}
+      feeds       = decoded.feeds or {}
       unread      = decoded.unread or 0
+      faviconCache = decoded.faviconCache or {}
+      feedImageCache = decoded.feedImageCache or {}
 
-      -- migra formato antigo ({ [id]=true, ... } direto) para o novo
-      -- ({ ids=..., order=... }), se necessario
+      -- migrate the old format ({ [id]=true, ... } directly) to the new one
+      -- ({ ids=..., order=... }), if needed
       for url, bucket in pairs(seen) do
         if type(bucket) == "table" and not bucket.ids then
           local migrated = { ids = {}, order = {} }
@@ -182,8 +236,8 @@ local function loadState()
         end
       end
 
-      -- sanitiza itens ja persistidos (podem ter sido salvos com UTF-8
-      -- quebrado por versoes anteriores deste plugin, antes deste fix)
+      -- sanitize already-persisted items (may have been saved with broken
+      -- UTF-8 by earlier versions of this plugin, before this fix)
       for _, item in ipairs(recentItems) do
         if item.title then
           item.title = sanitizeUtf8(item.title)
@@ -191,28 +245,94 @@ local function loadState()
         if item.feedTitle then
           item.feedTitle = sanitizeUtf8(item.feedTitle)
         end
+        if item.description then
+          item.description = sanitizeUtf8(item.description)
+        end
       end
     end
   end
 end
 
--- Nunca deixa uma falha de encode/escrita derrubar o entry (isso ja causou o
--- service ser desativado apos varios erros seguidos no update()).
+-- Never let an encode/write failure take down the entry (this already
+-- caused the service to be disabled after several consecutive update() errors).
 local function saveState()
   if not dataPath then
     return
   end
   local ok, encoded = pcall(noctalia.json.encode, {
-    seen        = seen,
-    recentItems = recentItems,
-    unread      = unread,
+    seen           = seen,
+    recentItems    = recentItems,
+    feeds          = feeds,
+    unread         = unread,
+    faviconCache   = faviconCache,
+    feedImageCache = feedImageCache,
   })
   if ok and type(encoded) == "string" then
     pcall(noctalia.writeFile, dataPath, encoded)
   end
 end
 
--- Idem para publicar em noctalia.state: nunca propaga erro pra cima.
+-- Checks whether a URL looks like a usable feed URL. Returns the normalized
+-- (trimmed) URL, or nil if it's not http(s).
+local function normalizeFeedUrl(raw)
+  if not raw then
+    return nil
+  end
+  local url = noctalia.string.trim(raw)
+  if url == "" then
+    return nil
+  end
+  if url:sub(1, 7) ~= "http://" and url:sub(1, 8) ~= "https://" then
+    return nil
+  end
+  return url
+end
+
+-- Builds the plugin-owned feed list: keeps the saved feeds, then folds in the
+-- ones the old `feed_urls` config setting still knows about (and any URL
+-- already being tracked in `seen`), so an update never silently loses feeds.
+local function migrateFeeds()
+  local list = {}
+  local known = {}
+  local function push(url)
+    if not url or url == "" then
+      return
+    end
+    url = noctalia.string.trim(url)
+    if url ~= "" and not known[url] then
+      known[url] = true
+      table.insert(list, url)
+    end
+  end
+  for _, url in ipairs(feeds) do
+    push(url)
+  end
+  for url in pairs(seen) do
+    push(url)
+  end
+  local configured
+  local ok = pcall(function()
+    configured = noctalia.getConfig("feed_urls")
+  end)
+  if not ok then
+    configured = nil -- the setting was removed from the manifest; ignore any legacy noise
+  end
+  if type(configured) == "table" then
+    for _, url in ipairs(configured) do
+      push(url)
+    end
+  end
+  feeds = list
+end
+
+-- Same idea for publishing to noctalia.state: never propagate an error upward.
+local function publishFeeds()
+  local ok, encoded = pcall(noctalia.json.encode, feeds)
+  if ok and type(encoded) == "string" then
+    noctalia.state.set("feeds", encoded)
+  end
+end
+
 local function publishItems()
   local ok, encoded = pcall(noctalia.json.encode, recentItems)
   if ok and type(encoded) == "string" then
@@ -221,10 +341,161 @@ local function publishItems()
 end
 
 -- ---------------------------------------------------------------------------
--- Parsing minimo de RSS 2.0 / Atom 1.0 usando SO busca literal (string.find
--- com plain=true) - evita o motor de padroes do Lua (".-", "[^>]", etc.),
--- que parece caro demais para o orcamento de CPU deste ambiente.
+-- Thumbnail download: ui.image only accepts a LOCAL file 'path', not a
+-- remote URL (confirmed in the official Wallhaven plugin). So we download
+-- the image into the plugin's cache and only then fill item.image with the
+-- local path. Queue with a concurrency cap, same pattern as Wallhaven, to
+-- avoid exceeding the host's simultaneous async operation limit.
 -- ---------------------------------------------------------------------------
+
+local THUMB_DIR = nil
+local thumbQueue = {}
+local thumbActive = 0
+local MAX_THUMB_CONCURRENT = 2
+
+local function shellQuote(s)
+  return "'" .. s:gsub("'", "'\\''") .. "'"
+end
+
+local function sanitizeFilename(s)
+  return (tostring(s):gsub("[^%w%-]", "_")):sub(1, 80)
+end
+
+local function ensureThumbDir()
+  local dir = noctalia.pluginDataDir()
+  if not dir then
+    return
+  end
+  THUMB_DIR = dir .. "/thumbs"
+  noctalia.runAsync("mkdir -p " .. shellQuote(THUMB_DIR))
+end
+
+local pumpThumbQueue
+
+pumpThumbQueue = function()
+  while thumbActive < MAX_THUMB_CONCURRENT and #thumbQueue > 0 do
+    local job = table.remove(thumbQueue, 1)
+    thumbActive = thumbActive + 1
+    noctalia.download(job.url, job.dest, function(ok)
+      thumbActive = thumbActive - 1
+      if ok then
+        if job.domain then
+          faviconCache[job.domain] = job.dest -- cache so other items from the same site reuse it
+        end
+        if job.feedUrl then
+          feedImageCache[job.feedUrl] = job.dest
+        end
+        for _, item in ipairs(recentItems) do
+          local match = job.feedUrl and item.feedUrl == job.feedUrl or item.id == job.id
+          if match then
+            item.image = job.dest
+          end
+        end
+        publishItems()
+        saveState()
+      else
+        noctalia.log("rss-notifier: thumbnail download failed for " .. job.url)
+        if job.feedUrl then
+          feedImageCache[job.feedUrl] = false -- remember the failure so we stop retrying this feed's logo
+          if job.fallback then -- logo failed: fall back to the site favicon so the card still has a photo
+            queueFaviconDownload(job.fallback.id, job.fallback.domain, job.fallback.faviconUrl)
+          end
+          saveState()
+        elseif job.domain then
+          faviconCache[job.domain] = false -- remember the failure so we stop retrying this domain
+          saveState()
+        end
+      end
+      pumpThumbQueue()
+    end)
+  end
+end
+
+-- Downloads a feed item's own cover image (enclosure/media). One file per
+-- item, since these URLs are essentially unique per item.
+local function queueThumbDownload(id, url)
+  if not THUMB_DIR or not url or url == "" then
+    return
+  end
+  local dest = THUMB_DIR .. "/" .. sanitizeFilename(id) .. ".img"
+  table.insert(thumbQueue, { id = id, url = url, dest = dest })
+  pumpThumbQueue()
+end
+
+-- Resolves a site favicon for an item, reusing the cache when another item
+-- from the same domain already downloaded it (favicons are per-SITE, not
+-- per-item, so there's no reason to fetch the same one over and over).
+-- faviconCache[domain] can be: nil (never tried), false (tried and failed -
+-- don't retry), or a string (local path, ready to use).
+local function queueFaviconDownload(id, domain, faviconUrl)
+  if not THUMB_DIR or not domain then
+    return
+  end
+  local cached = faviconCache[domain]
+  if cached == false then
+    return -- already know this domain has no favicon, don't hammer it again
+  end
+  if cached then
+    for _, item in ipairs(recentItems) do
+      if item.id == id then
+        item.image = cached
+        break
+      end
+    end
+    publishItems()
+    return
+  end
+  local dest = THUMB_DIR .. "/favicon-" .. sanitizeFilename(domain) .. ".img"
+  table.insert(thumbQueue, { id = id, url = faviconUrl, dest = dest, domain = domain })
+  pumpThumbQueue()
+end
+
+-- Downloads the FEED's own photo/logo (the <image>/<logo> of the channel),
+-- once per feed. Applied to every item of that feed, so all its cards share
+-- the same "foto do feed". Falls back to the site favicon if the logo fails.
+local function queueFeedImageDownload(feedUrl, imageUrl, fallback)
+  if not THUMB_DIR or not feedUrl or not imageUrl or imageUrl == "" then
+    return
+  end
+  local cached = feedImageCache[feedUrl]
+  if cached == false then
+    return -- logo already failed; the fallback favicon was already queued
+  end
+  if cached then
+    for _, item in ipairs(recentItems) do
+      if item.feedUrl == feedUrl then
+        item.image = cached
+      end
+    end
+    publishItems()
+    return
+  end
+  local dest = THUMB_DIR .. "/feed-" .. sanitizeFilename(feedUrl) .. ".img"
+  table.insert(thumbQueue, { url = imageUrl, dest = dest, feedUrl = feedUrl, fallback = fallback })
+  pumpThumbQueue()
+end
+
+-- ---------------------------------------------------------------------------
+-- Minimal RSS 2.0 / Atom 1.0 parsing using ONLY literal search (string.find
+-- with plain=true) - avoids Lua's pattern engine (".-", "[^>]", etc.), which
+-- turned out to be too expensive for this environment's CPU budget.
+-- ---------------------------------------------------------------------------
+
+-- (codepointToUtf8 was already defined above, near sanitizeUtf8 - reused here)
+
+-- Most common named accent entities in Portuguese (not strict XML, but some
+-- malformed feeds use them anyway).
+local NAMED_ENTITIES = {
+  aacute = 0xE1, eacute = 0xE9, iacute = 0xED, oacute = 0xF3, uacute = 0xFA,
+  Aacute = 0xC1, Eacute = 0xC9, Iacute = 0xCD, Oacute = 0xD3, Uacute = 0xDA,
+  atilde = 0xE3, otilde = 0xF5, Atilde = 0xC3, Otilde = 0xD5,
+  acirc = 0xE2, ecirc = 0xEA, ocirc = 0xF4, Acirc = 0xC2, Ecirc = 0xCA, Ocirc = 0xD4,
+  ccedil = 0xE7, Ccedil = 0xC7,
+  agrave = 0xE0, egrave = 0xE8, Agrave = 0xC0, Egrave = 0xC8,
+  uuml = 0xFC, Uuml = 0xDC, nbsp = 0x20, ndash = 0x2013, mdash = 0x2014,
+  lsquo = 0x2018, rsquo = 0x2019, ldquo = 0x201C, rdquo = 0x201D,
+  apos = 0x0027, hellip = 0x2026, bull = 0x2022,
+}
 
 local function decodeEntities(s)
   if not s then
@@ -234,7 +505,20 @@ local function decodeEntities(s)
   s = s:gsub("&gt;", ">")
   s = s:gsub("&quot;", '"')
   s = s:gsub("&#39;", "'")
-  s = s:gsub("&amp;", "&")
+  -- decimal numeric refs: &#244;
+  s = s:gsub("&#(%d+);", function(digits)
+    return codepointToUtf8(tonumber(digits))
+  end)
+  -- hex numeric refs: &#xF4; or &#Xf4;
+  s = s:gsub("&#[xX](%x+);", function(hex)
+    return codepointToUtf8(tonumber(hex, 16))
+  end)
+  -- common named accent entities (non-strict-XML feeds)
+  s = s:gsub("&(%a+);", function(name)
+    local cp = NAMED_ENTITIES[name]
+    return cp and codepointToUtf8(cp) or ("&" .. name .. ";")
+  end)
+  s = s:gsub("&amp;", "&") -- last, otherwise "&amp;lt;" would wrongly become "<"
   return sanitizeUtf8(noctalia.string.trim(s))
 end
 
@@ -248,7 +532,7 @@ local function stripCdata(s)
   return s
 end
 
--- Extrai o conteudo de <tag>...</tag> usando so find() literal.
+-- Extracts the content of <tag>...</tag> using only literal find().
 local function findTagContent(s, tag)
   local openStart = s:find("<" .. tag, 1, true)
   if not openStart then
@@ -265,7 +549,7 @@ local function findTagContent(s, tag)
   return decodeEntities(stripCdata(s:sub(openEnd + 1, closeStart - 1)))
 end
 
--- Extrai um valor de atributo de dentro da PRIMEIRA ocorrencia de <tag ...>.
+-- Extracts an attribute value from inside the FIRST occurrence of <tag ...>.
 local function findAttr(s, tag, attr)
   local openStart = s:find("<" .. tag, 1, true)
   if not openStart then
@@ -288,6 +572,71 @@ local function findAttr(s, tag, attr)
   return tagSrc:sub(valueStart, valueEnd - 1)
 end
 
+-- Removes HTML/XML tags using only literal find() (no pattern engine - this
+-- environment has a very tight CPU budget). Each removed tag becomes a space
+-- so <p>One</p><p>Two</p> still reads as "One Two".
+local function stripTags(s)
+  if not s or s == "" then
+    return s
+  end
+  local out = {}
+  local i = 1
+  local len = #s
+  while i <= len do
+    local lt = s:find("<", i, true)
+    if not lt then
+      out[#out + 1] = s:sub(i)
+      break
+    end
+    if lt > i then
+      out[#out + 1] = s:sub(i, lt - 1)
+    end
+    local gt = s:find(">", lt, true)
+    if not gt then
+      out[#out + 1] = s:sub(lt) -- malformed tag, keep the rest verbatim
+      break
+    end
+    out[#out + 1] = " "
+    i = gt + 1
+  end
+  return table.concat(out)
+end
+
+-- Collapses runs of whitespace (space/tab/newline) into a single space,
+-- preserving full UTF-8 sequences (accents, emoji, curly quotes).
+local function collapseSpace(s)
+  if not s or s == "" then
+    return s
+  end
+  local out = {}
+  local len = #s
+  local i = 1
+  local inSpace = false
+  while i <= len do
+    local b = s:byte(i)
+    if b == 32 or b == 9 or b == 10 or b == 13 then
+      if not inSpace then
+        out[#out + 1] = " "
+        inSpace = true
+      end
+      i = i + 1
+    else
+      local seqLen = 1
+      if b >= 0xF0 then
+        seqLen = 4
+      elseif b >= 0xE0 then
+        seqLen = 3
+      elseif b >= 0xC0 then
+        seqLen = 2
+      end
+      out[#out + 1] = s:sub(i, math.min(i + seqLen - 1, len))
+      inSpace = false
+      i = i + seqLen
+    end
+  end
+  return table.concat(out)
+end
+
 local function extractLink(block)
   local rssLink = findTagContent(block, "link") -- RSS: <link>URL</link>
   if rssLink and rssLink ~= "" then
@@ -300,10 +649,111 @@ local function extractId(block)
   return findTagContent(block, "guid") or findTagContent(block, "id") or extractLink(block)
 end
 
--- Encontra o PROXIMO bloco <tag ...>...</tag> a partir de fromPos, usando so
--- find() literal. Retorna o conteudo do bloco (ja cortado) e a posicao onde
--- parar na proxima chamada - permite processar um item por vez, em ticks
--- separados, em vez de tudo de uma vez dentro do callback http.
+-- Tries to find a cover image for the item: <enclosure type="image/...">,
+-- <media:thumbnail>, <media:content medium="image">, and finally an <img>
+-- tag inside the item HTML (news feeds very often only embed the image in
+-- <description>/<content>, before or in the middle of the text).
+local function extractImage(block)
+  local encUrl = findAttr(block, "enclosure", "url")
+  if encUrl then
+    local encType = findAttr(block, "enclosure", "type")
+    if not encType or encType:find("image", 1, true) then
+      return encUrl
+    end
+  end
+
+  local thumbUrl = findAttr(block, "media:thumbnail", "url")
+  if thumbUrl then
+    return thumbUrl
+  end
+
+  local mediaUrl = findAttr(block, "media:content", "url")
+  if mediaUrl then
+    local medium = findAttr(block, "media:content", "medium")
+    local mtype = findAttr(block, "media:content", "type")
+    if (not medium and not mtype) or (medium == "image") or (mtype and mtype:find("image", 1, true)) then
+      return mediaUrl
+    end
+  end
+
+  local imgSrc = findAttr(block, "img", "src")
+  if imgSrc and imgSrc ~= "" then
+    return decodeEntities(imgSrc)
+  end
+
+  return nil
+end
+
+-- When the image lives deep inside a very long <description>/<content>, the
+-- trimmed block above may not reach it. This rescans the FULL item content
+-- (from right after the opening tag up to the closing tag) so the post's own
+-- image is found no matter where it sits.
+local function extractItemImageDeep(body, itemContentStart, tag)
+  local closeStart = body:find("</" .. tag .. ">", itemContentStart, true)
+  if not closeStart then
+    return nil
+  end
+  return extractImage(body:sub(itemContentStart, closeStart - 1))
+end
+
+-- Plain-text summary of an item for the card: RSS <description> (rarely a
+-- full <content:encoded>, which we deliberately don't touch to save CPU) or
+-- Atom <summary>. Strips tags and collapses whitespace so it reads cleanly.
+local function extractDescription(block)
+  local text = findTagContent(block, "description")
+  if not text or text == "" then
+    text = findTagContent(block, "summary")
+  end
+  if not text or text == "" then
+    return nil
+  end
+  text = collapseSpace(stripTags(text))
+  text = noctalia.string.trim(text)
+  if text == "" then
+    return nil
+  end
+  return truncate(text, 400)
+end
+
+-- Extracts the host from a URL (e.g. "https://example.com/path" -> "example.com"),
+-- using only literal find()/sub() - no pattern engine.
+local function extractDomain(url)
+  if not url or url == "" then
+    return nil
+  end
+  local schemeEnd = url:find("://", 1, true)
+  local start = schemeEnd and (schemeEnd + 3) or 1
+  local slashPos = url:find("/", start, true)
+  local domain = slashPos and url:sub(start, slashPos - 1) or url:sub(start)
+
+  local atPos = domain:find("@", 1, true)
+  if atPos then
+    domain = domain:sub(atPos + 1) -- strip a possible "user:pass@" prefix
+  end
+  local colonPos = domain:find(":", 1, true)
+  if colonPos then
+    domain = domain:sub(1, colonPos - 1) -- strip a possible ":port" suffix
+  end
+
+  if domain == "" then
+    return nil
+  end
+  return domain
+end
+
+-- Fallback favicon URL for a site, used when the feed item has no image of
+-- its own. Uses Google's favicon service instead of guessing /favicon.ico
+-- paths or downloading+parsing the site's HTML, which would be much heavier.
+local function faviconUrlFor(domain)
+  return "https://www.google.com/s2/favicons?sz=64&domain=" .. domain
+end
+
+
+-- Finds the NEXT <tag ...>...</tag> block starting at fromPos, using only
+-- literal find(). Returns the (already trimmed) block content and the
+-- position to resume at on the next call - lets us process one item at a
+-- time, across separate ticks, instead of everything at once inside the
+-- http callback.
 local function findNextBlock(xml, tag, fromPos, maxItemBytes)
   local openStart = xml:find("<" .. tag, fromPos, true)
   if not openStart then
@@ -320,22 +770,22 @@ local function findNextBlock(xml, tag, fromPos, maxItemBytes)
   end
   local contentEnd = math.min(closeStart - 1, openEnd + maxItemBytes)
   if contentEnd < closeStart - 1 then
-    -- so precisa corrigir a fronteira UTF-8 quando o corte foi mesmo pelo
-    -- limite de bytes (nao pela tag de fechamento, que ja e uma fronteira segura)
+    -- only need to fix the UTF-8 boundary when the cut was actually caused
+    -- by the byte limit (not by the closing tag, which is already a safe boundary)
     contentEnd = safeCutEnd(xml, contentEnd, openEnd)
   end
   local block = xml:sub(openEnd + 1, contentEnd)
-  return block, closeStart + #closeTag
+  return block, closeStart + #closeTag, openEnd + 1
 end
 
 -- ---------------------------------------------------------------------------
--- Fila de processamento incremental: o callback http so guarda o corpo (ja
--- cortado) na fila; o parsing de verdade acontece aos poucos, um item por
--- tick de update(), porque o orcamento de CPU do callback assincrono e
--- pequeno demais para processar um feed inteiro de uma vez.
+-- Incremental processing queue: the http callback only stores the (already
+-- trimmed) body in the queue; the actual parsing happens gradually, one item
+-- per update() tick, because the async callback's CPU budget is too small
+-- to process a whole feed at once.
 -- ---------------------------------------------------------------------------
 
-local queue = {} -- lista de { url=, body=, pos=, tag=, feedTitle=, items=, notifyBudget= }
+local queue = {} -- list of { url=, body=, pos=, tag=, feedTitle=, items=, notifyBudget= }
 
 local function enqueueFeed(url, body, notifyBudget)
   table.insert(queue, {
@@ -345,14 +795,15 @@ local function enqueueFeed(url, body, notifyBudget)
     tag          = "item",
     triedEntry   = false,
     feedTitle    = nil,
+    feedImageUrl = nil,
     items        = {},
     notifyBudget = notifyBudget,
   })
 end
 
--- Finaliza um feed da fila: compara com o que ja foi visto, notifica o que
--- for novo e publica o estado. E um passo isolado (nao mistura com a
--- extracao de itens) para manter cada callback pequeno.
+-- Finalizes a feed from the queue: compares against what's already been
+-- seen, notifies on new items, and publishes state. This is an isolated
+-- step (not mixed with item extraction) to keep each callback small.
 local function finalizeFeed(f)
   local url = f.url
   local firstRun = isFirstRunForFeed(url)
@@ -366,11 +817,37 @@ local function finalizeFeed(f)
 
       if not firstRun then
         table.insert(recentItems, 1, {
-          id        = id,
-          title     = item.title,
-          link      = item.link,
-          feedTitle = f.feedTitle,
+          id          = id,
+          title       = item.title,
+          link        = item.link,
+          feedTitle   = f.feedTitle,
+          feedUrl     = url,
+          description = item.description,
+          image       = nil, -- filled in later with the LOCAL path, once the download finishes
         })
+        -- Priority: the ITEM's own image (enclosure/media/<img> in the post)
+        -- first - that's the actual content photo. If the item has none, fall
+        -- back to the feed's own logo (shared by its cards), and finally to
+        -- the site favicon so the card always has a photo.
+        if item.image and item.image ~= "" then
+          queueThumbDownload(id, item.image)
+        elseif f.feedImageUrl and f.feedImageUrl ~= "" then
+          local domain = extractDomain(url) or extractDomain(item.link)
+          queueFeedImageDownload(url, f.feedImageUrl, {
+            id = id,
+            domain = domain,
+            faviconUrl = domain and faviconUrlFor(domain) or nil,
+          })
+        else
+          -- prefer the FEED's own domain: item links often go through
+          -- redirect/tracking subdomains (e.g. redir.example.com) that have
+          -- no favicon of their own, while the feed's domain is reliably the
+          -- real site
+          local domain = extractDomain(url) or extractDomain(item.link)
+          if domain then
+            queueFaviconDownload(id, domain, faviconUrlFor(domain))
+          end
+        end
         if notifyEnabled and f.notifyBudget.count < f.notifyBudget.max then
           f.notifyBudget.count = f.notifyBudget.count + 1
           noctalia.notify(item.title, f.feedTitle)
@@ -392,8 +869,8 @@ local function finalizeFeed(f)
   saveState()
 end
 
--- Processa UM pequeno passo da fila: extrai no maximo um item do feed que
--- esta na frente da fila. Chamado uma vez por tick de update().
+-- Processes ONE small step of the queue: extracts at most one item from the
+-- feed at the front of the queue. Called once per update() tick.
 local function processQueueStep()
   local f = queue[1]
   if not f then
@@ -401,8 +878,23 @@ local function processQueueStep()
   end
 
   if not f.feedTitle then
-    f.feedTitle = findTagContent(truncate(f.body, 300), "title") or f.url
-    return -- um passo por tick: so o titulo desta vez
+    f.feedTitle = findTagContent(truncate(f.body, 600), "title")
+    f.feedImageUrl = nil
+    if f.feedTitle and #f.feedTitle > 0 then
+      -- the feed's own photo/logo: RSS <image><url>...</url></image> or
+      -- Atom <logo>...</logo>, pulled from the channel header
+      local imgBlock = findNextBlock(f.body, "image", 1, MAX_ITEM_BYTES)
+      if imgBlock then
+        f.feedImageUrl = findTagContent(imgBlock, "url")
+      end
+      if not f.feedImageUrl or f.feedImageUrl == "" then
+        f.feedImageUrl = findTagContent(truncate(f.body, 1200), "logo")
+      end
+    end
+    if not f.feedTitle or f.feedTitle == "" then
+      f.feedTitle = f.url
+    end
+    return -- one step per tick: just the title (and logo) this time
   end
 
   if #f.items >= MAX_ITEMS then
@@ -411,37 +903,44 @@ local function processQueueStep()
     return
   end
 
-  local block, nextPos = findNextBlock(f.body, f.tag, f.pos, MAX_ITEM_BYTES)
+  local block, nextPos, contentStart = findNextBlock(f.body, f.tag, f.pos, MAX_ITEM_BYTES)
 
   if not block then
     if f.tag == "item" and not f.triedEntry then
-      -- RSS nao encontrado: tenta Atom (<entry>) a partir do comeco
+      -- no RSS found: try Atom (<entry>) from the start
       f.tag = "entry"
       f.pos = 1
       f.triedEntry = true
       return
     end
-    -- acabaram os itens (ou nao achou nenhum) - finaliza
+    -- ran out of items (or found none) - finalize
     table.remove(queue, 1)
     finalizeFeed(f)
     return
   end
 
   f.pos = nextPos
+  local image = extractImage(block)
+  if not image then
+    -- the block was cut short (long title/description): search the whole item
+    image = extractItemImageDeep(f.body, contentStart, f.tag)
+  end
   table.insert(f.items, {
-    title = findTagContent(block, "title") or "(sem titulo)",
+    title = findTagContent(block, "title") or tr("panel.untitled_item"),
     link  = extractLink(block),
     id    = extractId(block),
+    image = image,
+    description = extractDescription(block),
   })
 end
 
 -- ---------------------------------------------------------------------------
--- Ciclo de busca
+-- Fetch cycle
 -- ---------------------------------------------------------------------------
 
 local function checkFeed(url, notifyBudget)
-  -- o callback http faz o MINIMO possivel: so guarda o corpo na fila.
-  -- Todo o parsing de verdade acontece depois, aos poucos, em processQueueStep().
+  -- the http callback does the BARE MINIMUM: just stores the body in the
+  -- queue. All the real parsing happens later, gradually, in processQueueStep().
   noctalia.http({ url = url, headers = { "Accept: application/rss+xml, application/atom+xml, application/xml, text/xml" } }, function(res)
     if not res.ok or not res.body or res.body == "" then
       return
@@ -451,17 +950,16 @@ local function checkFeed(url, notifyBudget)
 end
 
 local function fetchAll()
-  local urls = noctalia.getConfig("feed_urls") or {}
   local notifyBudget = { count = 0, max = noctalia.getConfig("max_notifications_per_cycle") or 5 }
 
-  for _, url in ipairs(urls) do
+  for _, url in ipairs(feeds) do
     if url and noctalia.string.trim(url) ~= "" then
       checkFeed(url, notifyBudget)
     end
   end
 end
 
-local REFRESH_TICK_MS = 1000 -- update() roda a cada segundo: drena a fila aos poucos
+local REFRESH_TICK_MS = 1000 -- update() runs every second: drains the queue gradually
 local ticksUntilFetch = 1
 
 local function applyInterval()
@@ -474,17 +972,20 @@ local function applyInterval()
 end
 
 -- ---------------------------------------------------------------------------
--- Ciclo de vida
+-- Lifecycle
 -- ---------------------------------------------------------------------------
 
 loadState()
+migrateFeeds()
+ensureThumbDir()
 applyInterval()
 noctalia.state.set("unread", unread)
+publishFeeds()
 publishItems()
-fetchAll() -- primeira leitura: so marca como "vistos", sem notificar (firstRun)
+fetchAll() -- first read: just marks items as "seen", without notifying (firstRun)
 
 function update()
-  processQueueStep() -- sempre drena um pedacinho da fila, se houver algo
+  processQueueStep() -- always drains a little bit of the queue, if there's anything
 
   ticksUntilFetch = ticksUntilFetch - 1
   if ticksUntilFetch <= 0 then
@@ -521,5 +1022,43 @@ function onIpc(_event, payload)
     recentItems = {}
     publishItems()
     saveState()
+  elseif _event == "add-feed" then
+    local url = normalizeFeedUrl(payload or "")
+    if url then
+      local exists = false
+      for _, existing in ipairs(feeds) do
+        if existing == url then
+          exists = true
+          break
+        end
+      end
+      if not exists then
+        table.insert(feeds, url)
+        saveState()
+        publishFeeds()
+      end
+      fetchAll() -- fetch (or re-fetch) right away so items show up quickly
+    end
+  elseif _event == "remove-feed" then
+    local url = noctalia.string.trim(payload or "")
+    local removed = false
+    for i, existing in ipairs(feeds) do
+      if existing == url then
+        table.remove(feeds, i)
+        removed = true
+        break
+      end
+    end
+    if removed then
+      seen[url] = nil -- stop tracking it, so restart migration doesn't bring it back
+      for i = #recentItems, 1, -1 do
+        if recentItems[i].feedUrl == url then
+          table.remove(recentItems, i)
+        end
+      end
+      saveState()
+      publishFeeds()
+      publishItems()
+    end
   end
 end

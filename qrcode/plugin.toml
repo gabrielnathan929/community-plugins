@@ -1,6 +1,6 @@
 id = "yocraft/qrcode"
 name = "QR Code Encoder"
-version = "1.0.0"
+version = "1.1.0"
 plugin_api = 15
 author = "yocraft"
 license = "MIT"
@@ -13,6 +13,9 @@ dependencies = [ "qrencode" ]
 [[widget]]
 id = "widget"
 entry = "widget.luau"
+
+    [widget.actions]
+    left = "panel-toggle yocraft/qrcode:panel"
 
     [[widget.setting]]
     key = "glyph"
@@ -28,6 +31,10 @@ entry = "widget.luau"
     description_key = "widget.custom_image.description"
     default = ""
     extensions = [".png", ".jpg", ".jpeg", ".webp", ".svg"]
+
+[[shortcut]]
+id = "shortcut"
+entry = "shortcut.luau"
 
 [[panel]]
 id = "panel"
@@ -69,6 +76,13 @@ options = [
     { value = "minimal", label_key = "settings.notify.minimal" },
     { value = "none", label_key = "settings.notify.none" },
 ]
+
+[[setting]]
+key = "keep_on_close"
+type = "bool"
+label_key = "settings.keep_on_close.label"
+description_key = "settings.keep_on_close.description"
+default = false
 
 [[setting]]
 key = "size"

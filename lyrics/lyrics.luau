@@ -24,6 +24,7 @@ local marqueeSpeed = tonumber(noctalia.getConfig("marquee_speed")) or 30
 local maxLines = tonumber(noctalia.getConfig("max_lines")) or 1
 local maxChars = tonumber(noctalia.getConfig("max_chars")) or 15
 local charWidth = tonumber(noctalia.getConfig("char_width")) or 9
+local textAlignment = noctalia.getConfig("text_alignment") or "left"
 local gradientOn = noctalia.getConfig("gradient")
 if gradientOn == nil then gradientOn = true end
 local animation = noctalia.getConfig("animation") or "karaoke"
@@ -240,6 +241,9 @@ end
 
 local function getFallbackLabel()
   if not track then return "--" end
+  if displayMode ~= "track" and showMode ~= "track" then
+    return noctalia.tr("no_lyrics")
+  end
   if track.artist and track.artist ~= "" then
     return track.title .. " + " .. track.artist
   end
@@ -429,6 +433,7 @@ local function buildLineRow(line, opts)
     key = opts.key or "line",
     gap = 0,
     align = "center",
+    justify = textAlignment == "right" and "end" or textAlignment == "center" and "center" or "start",
     minWidth = maxChars * charWidth,
     opacity = opts.opacity or 1,
   }, labels)
