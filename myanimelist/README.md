@@ -10,6 +10,7 @@ MyAnimeList.
 | ------- | ----- |
 | ID      | `gabrielnathan929/myanimelist` |
 | Entries | Panel: `browser`; launcher: `launcher` |
+| Launcher Prefix | `/myanimelist` |
 
 ## Usage
 

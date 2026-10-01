@@ -3,7 +3,8 @@
 -- Hamra Control — painel de controle do Hamra (NixOS) dentro do Noctalia.
 --
 -- Home: menu em grade com as seis áreas do painel. Instalar e Remover cobrem
--- Flatpak, pacotes nix (nix profile) e web apps, sempre com o painel de
+-- Flatpak, pacotes nix (nix profile), ferramentas mise e web apps, sempre com o
+-- painel de
 -- preview lateral no estilo do antigo `fzf --preview 'flatpak remote-info'`.
 -- O delta dos toggles vai para hosts/<host>/configuration.nix.
 
@@ -86,9 +87,9 @@ local view = "home"
 
 local MENU = {
   { id = "apps", label = "Aplicativos", glyph = "app-window", sub = "Toggles do hamra.programs" },
-  { id = "install", label = "Instalar", glyph = "download", sub = "Flatpak, nix e web apps" },
-  { id = "remove", label = "Remover", glyph = "trash", sub = "Flatpak, nix e web apps" },
-  { id = "update", label = "Atualizar", glyph = "refresh", sub = "flake update e rebuild" },
+  { id = "install", label = "Instalar", glyph = "download", sub = "Flatpak, nix, mise e web apps" },
+  { id = "remove", label = "Remover", glyph = "trash", sub = "Flatpak, nix, mise e web apps" },
+  { id = "update", label = "Atualizar", glyph = "refresh", sub = "flake update, mise e rebuild" },
   { id = "keys", label = "Chaves", glyph = "key", sub = "SSH e GPG" },
   { id = "system", label = "Sistema", glyph = "settings", sub = "Info, gerações, GC, rollback" },
 }
@@ -587,6 +588,30 @@ local function loadPreviewFor(item)
     return
   end
 
+  if item.kind == "mise" then
+    preview = { text = table.concat({
+      "Ferramenta mise",
+      "",
+      trim(item.desc or "") ~= "" and item.desc or "Sem descrição no registry.",
+      "",
+      "Instala: mise use -g " .. item.name .. "@latest",
+    }, "\n") }
+    return
+  end
+
+  if item.kind == "miseInstalled" then
+    preview = { text = table.concat({
+      "Gerenciado pelo mise (global)",
+      "",
+      "Versão: " .. ((item.version ~= nil and item.version ~= "") and item.version or "?"),
+      ((item.requested ~= nil and item.requested ~= "") and ("Pedida: " .. item.requested) or ""),
+      "",
+      "Upgrade: mise upgrade " .. item.name,
+      "Remover: mise unuse -g " .. item.name,
+    }, "\n") }
+    return
+  end
+
   local cmd
   if item.kind == "flatpak" then
     cmd = "flatpak remote-info flathub " .. shq(item.id)
@@ -622,6 +647,9 @@ local function itemBadge(item)
     return "instalado"
   end
   if item.kind == "nix" and item.installed then
+    return "instalado"
+  end
+  if item.kind == "mise" and item.installed then
     return "instalado"
   end
   if item.kind == "flatpakInstalled" then
@@ -735,6 +763,7 @@ local nxError = nil
 
 local installedFlat = {}
 local installedNix = {}
+local installedMise = {}
 
 local flatApps = nil
 local flatLoading = false
@@ -745,11 +774,22 @@ local removeError = nil
 local webApps = {}
 local webAppsLoaded = false
 
+local miseTools = nil
+local miseLoading = false
+local miseError = nil
+
+local mxQuery = ""
+local mxResults = nil
+local mxSearching = false
+local mxError = nil
+
 selectByKey = function(key)
   local pool = {}
   if view == "install" then
     if instTab == "flatpak" then
       pool = flResults or {}
+    elseif instTab == "mise" then
+      pool = mxResults or {}
     else
       pool = nxResults or {}
     end
@@ -758,6 +798,8 @@ selectByKey = function(key)
       pool = flatApps or {}
     elseif removeTab == "nix" then
       pool = nixApps or {}
+    elseif removeTab == "mise" then
+      pool = miseTools or {}
     else
       pool = webApps
     end
@@ -783,6 +825,9 @@ local function markInstalled()
   end
   for _, item in ipairs(nxResults or {}) do
     item.installed = installedNix[item.name] == true
+  end
+  for _, item in ipairs(mxResults or {}) do
+    item.installed = installedMise[item.name] == true
   end
 end
 
@@ -813,6 +858,20 @@ local function loadInstalledSets()
           if name ~= "home-manager-path" then
             installedNix[name] = true
           end
+        end
+      end
+    end
+    markInstalled()
+    render()
+  end, 60000)
+
+  noctalia.runAsync("mise ls --installed --json", function(res)
+    installedMise = {}
+    if res.exitCode == 0 then
+      local ok, data = pcall(noctalia.json.decode, res.stdout or "")
+      if ok and type(data) == "table" then
+        for name in pairs(data) do
+          installedMise[name] = true
         end
       end
     end
@@ -922,6 +981,48 @@ end
 local function nixInstall(attr)
   if runInTerminal("nix profile install " .. shq("nixpkgs#" .. attr)) then
     actionStatus = "Instalando " .. attr .. " no terminal."
+    render()
+  end
+end
+
+local function miseSearch(q)
+  mxSearching = true
+  mxError = nil
+  render()
+  noctalia.runAsync("mise search --no-header " .. shq(q), function(res)
+    mxSearching = false
+    local items = {}
+    if res.exitCode == 0 then
+      local seen = {}
+      for _, line in ipairs(splitLines(res.stdout or "")) do
+        local name = line:match("^(%S+)%s+")
+        local desc = line:match("^%S+%s+(.+)$")
+        if name ~= nil and name ~= "" and seen[name] == nil then
+          seen[name] = true
+          table.insert(items, {
+            key = "mx:" .. name,
+            kind = "mise",
+            name = name,
+            desc = trim(desc or ""),
+            installed = installedMise[name] == true,
+          })
+        end
+      end
+    else
+      mxError = "mise search falhou: " .. trim(res.stderr):sub(1, 300)
+    end
+    mxResults = items
+    if #items == 0 and mxError == nil then
+      mxError = "Nada encontrado para '" .. q .. "' no registry do mise."
+    end
+    resetSelection()
+    render()
+  end, 60000)
+end
+
+local function miseInstall(name)
+  if runInTerminal("mise use -g " .. shq(name .. "@latest")) then
+    actionStatus = "mise use -g " .. name .. "@latest no terminal."
     render()
   end
 end
@@ -1161,6 +1262,12 @@ local function installAction()
     end
     return { label = "Instalar (nix profile)", glyph = "download", onClick = "onInstGo" }
   end
+  if selected.kind == "mise" then
+    if selected.installed then
+      return { label = "Já está instalado", glyph = "check", enabled = false, onClick = "onInstGo" }
+    end
+    return { label = "Instalar (mise use -g)", glyph = "download", onClick = "onInstGo" }
+  end
   return nil
 end
 
@@ -1172,6 +1279,8 @@ function onInstGo()
     flatInstall(selected.id)
   elseif selected.kind == "nix" then
     nixInstall(selected.attr)
+  elseif selected.kind == "mise" then
+    miseInstall(selected.name)
   end
 end
 
@@ -1214,6 +1323,7 @@ local function renderInstall()
   table.insert(children, tabsBar({
     { id = "flatpak", label = "Flatpak", glyph = "box" },
     { id = "nix", label = "Nix", glyph = "package" },
+    { id = "mise", label = "Mise", glyph = "wrench" },
     { id = "web", label = "Web app", glyph = "app-window" },
   }, instTab, setInstTab))
 
@@ -1269,6 +1379,32 @@ local function renderInstall()
       })
     ))
     table.insert(children, hint("Instala com `nix profile install nixpkgs#...` (sem sudo); a remoção fica em Remover › Nix."))
+  elseif instTab == "mise" then
+    table.insert(children, searchBox(
+      "inst-search-mise",
+      mxQuery,
+      "Buscar ferramenta no registry do mise (ex.: node)...",
+      function(v) mxQuery = v or "" end,
+      "onMxSubmit",
+      "onMxSearch",
+      mxSearching
+    ))
+
+    local rows = {}
+    if mxResults ~= nil then
+      for _, item in ipairs(mxResults) do
+        table.insert(rows, itemRow(item))
+      end
+    end
+    table.insert(children, splitPane(
+      listOrMessage(rows, mxSearching, mxError, "Busque uma ferramenta (node, python, go...) para ver os resultados."),
+      selectionPane({
+        action = installAction(),
+        status = actionStatus,
+        empty = "Passe o mouse num resultado para ver a descrição aqui.",
+      })
+    ))
+    table.insert(children, hint("Instala com `mise use -g <ferramenta>@latest`; fica no PATH na frente do Nix dentro do shell e é gerenciado em Remover › Mise."))
   else
     table.insert(children, ui.input({
       key = "wa-name",
@@ -1381,6 +1517,42 @@ local function loadNixProfile()
   end, 60000)
 end
 
+local function loadMiseTools()
+  miseLoading = true
+  render()
+  noctalia.runAsync("mise ls --installed --json", function(res)
+    miseLoading = false
+    miseError = nil
+    local items = {}
+    if res.exitCode == 0 then
+      local ok, data = pcall(noctalia.json.decode, res.stdout or "")
+      if ok and type(data) == "table" then
+        for name, versions in pairs(data) do
+          local v = type(versions) == "table" and versions[1] or nil
+          local requested = (v ~= nil and type(v) == "table") and v.requested_version or nil
+          table.insert(items, {
+            key = "imx:" .. name,
+            kind = "miseInstalled",
+            name = name,
+            version = (v ~= nil and type(v) == "table" and v.version) or "",
+            requested = requested or "",
+          })
+        end
+      end
+    else
+      miseError = "mise ls falhou: " .. trim(res.stderr):sub(1, 200)
+    end
+    table.sort(items, function(a, b)
+      return a.name < b.name
+    end)
+    miseTools = items
+    if selected ~= nil and selected.kind == "miseInstalled" then
+      resetSelection()
+    end
+    render()
+  end, 60000)
+end
+
 local function flatRemove(app)
   if app.scope == "system" then
     if runInTerminal("sudo flatpak uninstall --system --noninteractive " .. shq(app.id)) then
@@ -1420,6 +1592,22 @@ local function nixRemove(item)
   end, 60000)
 end
 
+local function miseRemove(tool)
+  actionStatus = "Removendo " .. tool.name .. " do mise..."
+  render()
+  noctalia.runAsync("mise unuse -g " .. shq(tool.name) .. " && mise uninstall -y " .. shq(tool.name), function(res)
+    if res.exitCode == 0 then
+      actionStatus = tool.name .. " removido do mise."
+      notify(tool.name .. " removido do mise.")
+    else
+      actionStatus = "Falha: " .. trim(res.stderr):sub(1, 200)
+      notifyError("Falha ao remover " .. tool.name .. ": " .. trim(res.stderr))
+    end
+    resetSelection()
+    loadMiseTools()
+  end, 60000)
+end
+
 local function removeAction()
   if selected == nil then
     return nil
@@ -1429,6 +1617,9 @@ local function removeAction()
   end
   if selected.kind == "nixInstalled" then
     return { label = "Remover (nix profile)", glyph = "trash", variant = "destructive", onClick = "onRmGo" }
+  end
+  if selected.kind == "miseInstalled" then
+    return { label = "Remover (mise)", glyph = "trash", variant = "destructive", onClick = "onRmGo" }
   end
   if selected.kind == "web" then
     return { label = "Remover web app", glyph = "trash", variant = "destructive", onClick = "onRmGo" }
@@ -1444,6 +1635,8 @@ function onRmGo()
     flatRemove(selected)
   elseif selected.kind == "nixInstalled" then
     nixRemove(selected)
+  elseif selected.kind == "miseInstalled" then
+    miseRemove(selected)
   elseif selected.kind == "web" then
     removeWebApp(selected)
   end
@@ -1463,6 +1656,7 @@ local function renderRemove()
   table.insert(children, tabsBar({
     { id = "flatpak", label = "Flatpak", glyph = "box" },
     { id = "nix", label = "Nix", glyph = "package" },
+    { id = "mise", label = "Mise", glyph = "wrench" },
     { id = "web", label = "Web apps", glyph = "app-window" },
   }, removeTab, setRemoveTab))
 
@@ -1491,6 +1685,17 @@ local function renderRemove()
       loading = true
     else
       for _, item in ipairs(nixApps) do
+        table.insert(rows, itemRow(item))
+      end
+    end
+  elseif removeTab == "mise" then
+    loading = miseLoading
+    err = miseError
+    empty = "Nenhuma ferramenta instalada pelo mise."
+    if miseTools == nil then
+      loading = true
+    else
+      for _, item in ipairs(miseTools) do
         table.insert(rows, itemRow(item))
       end
     end
@@ -1529,6 +1734,38 @@ end
 
 -- ── Atualizar ───────────────────────────────────────────────────────────────
 
+local miseOutdated = nil
+local miseOutdatedLoading = false
+local miseOutdatedError = nil
+
+local function loadMiseOutdated()
+  miseOutdatedLoading = true
+  miseOutdatedError = nil
+  render()
+  noctalia.runAsync("mise outdated --json", function(res)
+    miseOutdatedLoading = false
+    local rows = {}
+    if res.exitCode ~= 0 then
+      miseOutdatedError = "mise outdated falhou: " .. trim(res.stderr):sub(1, 200)
+    else
+      local ok, data = pcall(noctalia.json.decode, res.stdout or "")
+      if ok and type(data) == "table" then
+        for name, versions in pairs(data) do
+          local current = type(versions) == "table" and versions[1] or nil
+          local installedV = (current ~= nil and type(current) == "table") and current.version or nil
+          local latestV = (current ~= nil and type(current) == "table") and (current.latest or current.bump or current.version) or nil
+          rows[#rows + 1] = { name = name, installed = installedV or "?", latest = latestV or "?" }
+        end
+      end
+    end
+    table.sort(rows, function(a, b)
+      return a.name < b.name
+    end)
+    miseOutdated = rows
+    render()
+  end, 60000)
+end
+
 local function renderUpdate()
   local children = { header("Atualizar", {}) }
 
@@ -1549,7 +1786,36 @@ local function renderUpdate()
     ui.button({ text = "Rebuild (boot, aplica no próximo boot)", glyph = "device-floppy", onClick = "onRebuildBoot" }),
   }))
 
-  table.insert(children, hint("O rebuild roda num terminal porque o sudo pede sua senha. O flake update também atualiza o lock do Home Manager."))
+  table.insert(children, ui.separator({ spacing = 6 }))
+
+  local miseBlock = {
+    ui.row({ align = "center", gap = 8 }, {
+      ui.label({ text = "Ferramentas mise", fontSize = 14, fontWeight = "bold", color = "primary", flexGrow = 1 }),
+      ui.button({ glyph = "reload", variant = "ghost", tooltip = "Recarregar", onClick = "onMiseReload", enabled = not miseOutdatedLoading }),
+    }),
+  }
+  if miseOutdatedLoading then
+    table.insert(miseBlock, ui.label({ text = "Consultando mise outdated...", color = "on_surface_variant", fontSize = 11 }))
+  elseif miseOutdatedError ~= nil then
+    table.insert(miseBlock, ui.label({ text = miseOutdatedError, color = "error", fontSize = 11, maxLines = 3 }))
+    table.insert(miseBlock, ui.button({ text = "Tentar de novo", onClick = "onMiseReload" }))
+  elseif miseOutdated == nil then
+    table.insert(miseBlock, ui.label({ text = "Carregando...", color = "on_surface_variant", fontSize = 11 }))
+    loadMiseOutdated()
+  elseif #miseOutdated == 0 then
+    table.insert(miseBlock, ui.label({ text = "Todas as ferramentas mise estão atualizadas.", color = "on_surface_variant", fontSize = 11 }))
+  else
+    for _, row in ipairs(miseOutdated) do
+      table.insert(miseBlock, ui.row({ align = "center", gap = 10, key = "mise-up-" .. row.name }, {
+        ui.label({ text = row.name, fontSize = 12, flexGrow = 1, maxLines = 1 }),
+        ui.label({ text = row.installed .. " → " .. row.latest, fontSize = 11, color = "on_surface_variant", maxLines = 1 }),
+        ui.button({ glyph = "download", variant = "outline", tooltip = "mise upgrade " .. row.name, onClick = function() onMiseUpgrade(row.name) end }),
+      }))
+    end
+  end
+  table.insert(children, ui.column({ gap = 6 }, miseBlock))
+
+  table.insert(children, hint("O rebuild roda num terminal porque o sudo pede sua senha. O flake update também atualiza o lock do Home Manager. O mise upgrade abre um terminal para você acompanhar."))
   table.insert(children, ui.spacer({ flexGrow = 1 }))
 
   return ui.column({ flexGrow = 1, gap = 10, align = "stretch" }, children)
@@ -1745,9 +2011,14 @@ openView = function(id)
     if nixApps == nil and not nixLoading then
       loadNixProfile()
     end
+    if miseTools == nil and not miseLoading then
+      loadMiseTools()
+    end
     if not webAppsLoaded then
       loadWebApps()
     end
+  elseif id == "update" and miseOutdated == nil and not miseOutdatedLoading then
+    loadMiseOutdated()
   end
   render()
 end
@@ -1843,6 +2114,29 @@ function onNxSubmit(value)
   end
 end
 
+function onMxSearch()
+  if trim(mxQuery) ~= "" then
+    miseSearch(mxQuery)
+  end
+end
+
+function onMxSubmit(value)
+  mxQuery = trim(value or mxQuery)
+  if mxQuery ~= "" then
+    miseSearch(mxQuery)
+  end
+end
+
+function onMiseReload()
+  loadMiseOutdated()
+end
+
+function onMiseUpgrade(name)
+  if runInTerminal("mise upgrade " .. shq(name)) then
+    notify("mise upgrade " .. name .. " disparado no terminal.")
+  end
+end
+
 function onWaUrlSubmit(value)
   waUrl = value or waUrl
   createWebApp()
@@ -1862,6 +2156,8 @@ function onRmReload()
     loadFlatApps()
   elseif removeTab == "nix" then
     loadNixProfile()
+  elseif removeTab == "mise" then
+    loadMiseTools()
   else
     loadWebApps()
     render()
@@ -1911,10 +2207,10 @@ function onSysRollback()
   render()
 end
 
--- Controle externo via `noctalia msg plugin gabrielnathan929/hamra-control:main all <evento> [payload]`:
+-- Controle externo via `noctalia msg plugin gabrielnathan929/nixdeck:main all <evento> [payload]`:
 --   view   <id>        abre uma view (home, apps, install, remove, update, keys, system)
 --   tab    <view>:<tab> troca a aba (install:flatpak | install:nix | install:web | remove:...)
---   search <origem> <q> busca e mostra o preview (flatpak | nix)
+--   search <origem> <q> busca e mostra o preview (flatpak | nix | mise)
 --   select <key>       seleciona um item para o preview (fl:, nx:, ifl:, inx:, web:)
 function onIpc(event, payload)
   local e = trim(event or "")
@@ -1957,6 +2253,11 @@ function onIpc(event, payload)
       instTab = "nix"
       openView("install")
       nixSearch(q)
+    elseif origin == "mise" then
+      mxQuery = q
+      instTab = "mise"
+      openView("install")
+      miseSearch(q)
     end
     return
   end
@@ -1979,12 +2280,16 @@ function onOpen(_)
     noctalia.state.set("hamra_install_query", "")
     local tab = noctalia.state.get("hamra_install_tab")
     noctalia.state.set("hamra_install_tab", "")
-    instTab = (type(tab) == "string" and tab == "nix") and "nix" or "flatpak"
+    instTab = (type(tab) == "string" and (tab == "nix" or tab == "mise")) and tab or "flatpak"
     resetSelection()
     if instTab == "nix" then
       nxQuery = q
       openView("install")
       nixSearch(q)
+    elseif instTab == "mise" then
+      mxQuery = q
+      openView("install")
+      miseSearch(q)
     else
       flQuery = q
       openView("install")

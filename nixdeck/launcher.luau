@@ -1,12 +1,12 @@
 --!nonstrict
 
-local PANEL_ID = "gabrielnathan929/hamra-control:main"
+local PANEL_ID = "gabrielnathan929/nixdeck:main"
 
 local MENU = {
   { id = "apps", label = "Aplicativos", glyph = "app-window", sub = "Toggles do hamra.programs" },
-  { id = "install", label = "Instalar", glyph = "download", sub = "Flatpak, nix e web apps" },
-  { id = "remove", label = "Remover", glyph = "trash", sub = "Flatpak, nix e web apps" },
-  { id = "update", label = "Atualizar", glyph = "refresh", sub = "flake update e rebuild" },
+  { id = "install", label = "Instalar", glyph = "download", sub = "Flatpak, nix, mise e web apps" },
+  { id = "remove", label = "Remover", glyph = "trash", sub = "Flatpak, nix, mise e web apps" },
+  { id = "update", label = "Atualizar", glyph = "refresh", sub = "flake update, mise e rebuild" },
   { id = "keys", label = "Chaves", glyph = "key", sub = "SSH e GPG" },
   { id = "system", label = "Sistema", glyph = "settings", sub = "Info, gerações, GC, rollback" },
 }
@@ -44,14 +44,20 @@ function onQuery(query)
       rows[#rows + 1] = {
         id = "search-flathub:" .. text,
         title = "Buscar '" .. text .. "' no Flathub",
-        subtitle = "Abre Hamra Control › Instalar › Flatpak",
+        subtitle = "Abre NixDeck › Instalar › Flatpak",
         glyph = "box",
       }
       rows[#rows + 1] = {
         id = "search-nix:" .. text,
         title = "Buscar '" .. text .. "' no nixpkgs",
-        subtitle = "Abre Hamra Control › Instalar › Nix",
+        subtitle = "Abre NixDeck › Instalar › Nix",
         glyph = "package",
+      }
+      rows[#rows + 1] = {
+        id = "search-mise:" .. text,
+        title = "Buscar '" .. text .. "' no mise",
+        subtitle = "Abre NixDeck › Instalar › Mise",
+        glyph = "wrench",
       }
     end
   end
@@ -78,6 +84,14 @@ function onActivate(id)
   if n ~= nil then
     noctalia.state.set("hamra_install_tab", "nix")
     noctalia.state.set("hamra_install_query", trim(n))
+    noctalia.togglePanel(PANEL_ID)
+    return
+  end
+
+  local m = id:match("^search%-mise:(.+)$")
+  if m ~= nil then
+    noctalia.state.set("hamra_install_tab", "mise")
+    noctalia.state.set("hamra_install_query", trim(m))
     noctalia.togglePanel(PANEL_ID)
   end
 end

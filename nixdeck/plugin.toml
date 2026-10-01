@@ -1,11 +1,11 @@
-id = "gabrielnathan929/hamra-control"
-name = "Hamra Control"
-version = "0.2.0"
+id = "gabrielnathan929/nixdeck"
+name = "NixDeck"
+version = "0.3.0"
 plugin_api = 3
 author = "gabrielnathan929"
 license = "MIT"
 icon = "settings"
-description = "Control center for Hamra (NixOS): app toggles, SSH/GPG keys, install/remove Flatpak, nix and web apps with a live preview, update and system tasks."
+description = "Control center for Hamra (NixOS): app toggles, SSH/GPG keys, install Flatpak/nix/mise/web apps, updates, system tasks."
 dependencies = []
 tags = ["nixos", "system", "panel", "launcher"]
 
@@ -20,5 +20,5 @@ position = "auto"
 [[launcher_provider]]
 id = "menu"
 entry = "launcher.luau"
-prefix = "hamra"
+prefix = "nixdeck"
 include_in_global_search = false

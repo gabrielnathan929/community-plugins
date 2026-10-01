@@ -1,5 +1,5 @@
 {
-  "title": "Hamra Control",
+  "title": "NixDeck",
   "menu": {
     "apps": {
       "label": "Aplicativos",
@@ -7,15 +7,15 @@
     },
     "install": {
       "label": "Instalar",
-      "sub": "Flatpak, nix e web apps"
+      "sub": "Flatpak, nix, mise e web apps"
     },
     "remove": {
       "label": "Remover",
-      "sub": "Flatpak, nix e web apps"
+      "sub": "Flatpak, nix, mise e web apps"
     },
     "update": {
       "label": "Atualizar",
-      "sub": "flake update e rebuild"
+      "sub": "flake update, mise e rebuild"
     },
     "keys": {
       "label": "Chaves",
