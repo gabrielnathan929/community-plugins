@@ -1,10 +1,10 @@
 id = "gabrielnathan929/hamra-control"
 name = "Hamra Control"
-version = "0.5.0"
+version = "0.5.1"
 plugin_api = 3
 author = "gabrielnathan929"
 license = "MIT"
-icon = "settings"
+icon = "adjustments"
 description = "Control center for Hamra (NixOS): app toggles, SSH/GPG keys, install Flatpak/nix/mise/web apps, updates, system tasks."
 dependencies = []
 tags = ["nixos", "system", "panel", "launcher", "bar"]
@@ -26,7 +26,7 @@ entry = "widget.luau"
   type = "glyph"
   label_key = "settings.glyph.label"
   description_key = "settings.glyph.description"
-  default = "settings"
+  default = "adjustments"
 
   [[widget.setting]]
   key = "show_label"

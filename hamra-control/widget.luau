@@ -10,7 +10,7 @@ local showLabel = noctalia.getConfig("show_label")
 local label = noctalia.getConfig("label")
 
 local function render()
-  barWidget.setGlyph(if type(glyph) == "string" and glyph ~= "" then glyph else "settings")
+  barWidget.setGlyph(if type(glyph) == "string" and glyph ~= "" then glyph else "adjustments")
   if showLabel and type(label) == "string" and label ~= "" then
     barWidget.setText(label)
   else

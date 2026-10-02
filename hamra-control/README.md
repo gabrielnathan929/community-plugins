@@ -128,7 +128,7 @@ Bar widget settings (per widget instance):
 
 | Setting | Type | Default | Description |
 | --- | --- | --- | --- |
-| `glyph` | glyph | `settings` | Icon shown in the bar. |
+| `glyph` | glyph | `adjustments` | Icon shown in the bar. |
 | `show_label` | bool | `false` | Show the text next to the icon. |
 | `label` | string | `Hamra` | Text shown when `show_label` is on. |
 

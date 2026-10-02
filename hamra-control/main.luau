@@ -2287,7 +2287,7 @@ local function renderHome()
 
   return ui.column({ flexGrow = 1, gap = 14, align = "stretch" }, {
     ui.row({ align = "center", gap = 8 }, {
-      ui.glyph({ name = "settings", size = 18, color = "primary" }),
+      ui.glyph({ name = "adjustments", size = 18, color = "primary" }),
       ui.label({ text = "Hamra Control", fontSize = 18, fontWeight = "bold", flexGrow = 1 }),
       ui.button({ glyph = "close", variant = "ghost", tooltip = "Fechar", onClick = function() panel.close() end }),
     }),
