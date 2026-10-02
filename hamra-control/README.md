@@ -11,7 +11,7 @@ tools and exposes common system chores — replacing the old terminal `hamra-men
 | Field | Value |
 | --- | --- |
 | ID | `gabrielnathan929/hamra-control` |
-| Entries | panel: `main`; launcher provider: `menu` |
+| Entries | panel: `main`; widget: `control`; launcher provider: `menu` |
 | Launcher Prefix | `/hamra` |
 
 Open the panel with:
@@ -22,6 +22,12 @@ noctalia msg panel-toggle gabrielnathan929/hamra-control:main
 
 Or bind a key to the same command (Hamra binds `Alt+Space` next to the other
 plugin keybinds).
+
+### Bar widget
+
+Add the **control** widget to any bar (Settings → Bar → Add Widget): left click
+opens the panel, right click jumps straight to the **Instalar** view with a
+search ready.
 
 ## Requirements
 
@@ -118,7 +124,13 @@ are not removable this way).
 
 ## Settings
 
-This plugin exposes no settings.
+Bar widget settings (per widget instance):
+
+| Setting | Type | Default | Description |
+| --- | --- | --- | --- |
+| `glyph` | glyph | `settings` | Icon shown in the bar. |
+| `show_label` | bool | `false` | Show the text next to the icon. |
+| `label` | string | `Hamra` | Text shown when `show_label` is on. |
 
 ## Notes
 

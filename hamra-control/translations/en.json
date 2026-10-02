@@ -25,5 +25,22 @@
       "label": "Sistema",
       "sub": "Info, gerações, GC, rollback"
     }
+  },
+  "settings": {
+    "glyph": {
+      "label": "Ícone",
+      "description": "Ícone exibido no widget da barra."
+    },
+    "show_label": {
+      "label": "Mostrar texto",
+      "description": "Exibe o texto ao lado do ícone."
+    },
+    "label": {
+      "label": "Texto",
+      "description": "Texto exibido quando Mostrar texto está ativo."
+    }
+  },
+  "widget": {
+    "tooltip": "Hamra Control — clique para abrir o painel, clique direito para Instalar"
   }
 }

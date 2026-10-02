@@ -14,5 +14,22 @@
   "request_failed": "Request failed (HTTP {status})",
   "empty_response": "Empty response from AniList.",
   "parse_error": "Could not parse AniList response.",
-  "search_error": "No results for '{query}'."
+  "search_error": "No results for '{query}'.",
+  "settings": {
+    "glyph": {
+      "label": "Icon",
+      "description": "Icon shown in the bar widget."
+    },
+    "show_label": {
+      "label": "Show label",
+      "description": "Show the text next to the icon."
+    },
+    "label": {
+      "label": "Label",
+      "description": "Text shown when Show label is on."
+    }
+  },
+  "widget": {
+    "tooltip": "MyAnimeList — search anime & manga"
+  }
 }

@@ -1,11 +1,11 @@
 id = "gabrielnathan929/myanimelist"
 name = "MyAnimeList"
-version = "0.2.1"
+version = "0.3.0"
 plugin_api = 3
 author = "gabrielnathan929"
 license = "MIT"
 dependencies = []
-tags = ["media", "launcher", "panel"]
+tags = ["media", "launcher", "panel", "bar"]
 icon = "star"
 description = "Search anime & manga via AniList and open results on MyAnimeList."
 
@@ -16,6 +16,32 @@ width = 980
 height = 700
 placement = "attached"
 position = "auto"
+
+[[widget]]
+id = "search"
+entry = "widget.luau"
+
+  [[widget.setting]]
+  key = "glyph"
+  type = "glyph"
+  label_key = "settings.glyph.label"
+  description_key = "settings.glyph.description"
+  default = "star"
+
+  [[widget.setting]]
+  key = "show_label"
+  type = "bool"
+  label_key = "settings.show_label.label"
+  description_key = "settings.show_label.description"
+  default = false
+
+  [[widget.setting]]
+  key = "label"
+  type = "string"
+  label_key = "settings.label.label"
+  description_key = "settings.label.description"
+  default = "MAL"
+  visible_when = { key = "show_label", values = ["true"] }
 
 [[launcher_provider]]
 id = "launcher"

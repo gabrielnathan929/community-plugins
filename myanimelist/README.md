@@ -9,7 +9,7 @@ MyAnimeList.
 | Field   | Value |
 | ------- | ----- |
 | ID      | `gabrielnathan929/myanimelist` |
-| Entries | Panel: `browser`; launcher: `launcher` |
+| Entries | Panel: `browser`; bar widget: `search`; launcher: `launcher` |
 | Launcher Prefix | `/myanimelist` |
 
 ## Usage
@@ -20,6 +20,11 @@ directly: `/myanimelist <search term>`. You can also bind it in your compositor:
 ```sh
 noctalia msg panel-toggle gabrielnathan929/myanimelist:browser
 ```
+
+### Bar widget
+
+Add the **search** widget to any bar (Settings → Bar → Add Widget) — one click
+opens the panel.
 
 ### Search
 
@@ -37,6 +42,16 @@ noctalia msg panel-toggle gabrielnathan929/myanimelist:browser
 | ------------------------------- | --------------------------------------- |
 | `/myanimelist`                  | Open the panel with an empty search     |
 | `/myanimelist <search term>`    | Open the panel with the query pre-filled |
+
+## Settings
+
+Bar widget settings (per widget instance):
+
+| Setting | Type | Default | Description |
+| --- | --- | --- | --- |
+| `glyph` | glyph | `star` | Icon shown in the bar. |
+| `show_label` | bool | `false` | Show the text next to the icon. |
+| `label` | string | `MAL` | Text shown when `show_label` is on. |
 
 ## Storage
 
