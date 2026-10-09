@@ -88,7 +88,10 @@ with the IPC command above. The home screen shows the menu as a grid of cards:
   the output).
 - **Chaves** — SSH and GPG grouped: generate an ed25519 key from an e-mail,
   copy public keys, load the agent, edit `~/.ssh/config`; generate/list GPG
-  keys, set the git signing key, edit `gpg-agent.conf`.
+  keys, set the git signing key, edit `gpg-agent.conf`. Private keys can be
+  pasted and imported: SSH goes to `~/.ssh` (700/600/644, `.pub` derived,
+  `ssh-add`, `ssh -T git@github.com` test shown); GPG goes through
+  `gpg --import` (ownertrust ultimate, clearsign round-trip test shown).
 - **Sistema** — host info card (kernel, NixOS version, uptime, current
   generation) plus a task list (list generations, `nix-collect-garbage -d`, edit
   the host's `configuration.nix`, and rollback to the previous generation with a
