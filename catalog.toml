@@ -1137,15 +1137,15 @@ tags = ["hyprland"]
 [[plugin]]
 id = "gabrielnathan929/myanimelist"
 name = "MyAnimeList"
-version = "0.2.1"
-updated_at = 1790866498
+version = "0.3.0"
+updated_at = 1790901613
 added_at = 1784409394
 author = "gabrielnathan929"
 license = "MIT"
 icon = "star"
 description = "Search anime & manga via AniList and open results on MyAnimeList."
 plugin_api = 3
-tags = ["media", "launcher", "panel"]
+tags = ["media", "launcher", "panel", "bar"]
 
 [[plugin]]
 id = "weinguyen/9router-control"
@@ -3212,14 +3212,14 @@ updated_at = 1790338491
 rev = "69edf25c45dc117d258a37106c2331787fac9a7a"
 
 [[plugin]]
-id = "gabrielnathan929/hamra-control"
-name = "Hamra Control"
-version = "0.4.0"
-updated_at = 1790890686
-added_at = 1790890686
+id = "gabrielnathan929/controlfreak"
+name = "ControlFreak"
+version = "0.6.0"
+updated_at = 1791567607
+added_at = 1791567607
 author = "gabrielnathan929"
 license = "MIT"
-icon = "settings"
+icon = "adjustments"
 description = "Control center for Hamra (NixOS): app toggles, SSH/GPG keys, install Flatpak/nix/mise/web apps, updates, system tasks."
 plugin_api = 3
-tags = ["nixos", "system", "panel", "launcher"]
+tags = ["nixos", "system", "panel", "launcher", "bar"]
