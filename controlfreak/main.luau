@@ -1,12 +1,12 @@
 --!nonstrict
 
--- Hamra Control — painel de controle do Hamra (NixOS) dentro do Noctalia.
+-- ControlFreak — painel de controle do Hamra (NixOS) dentro do Noctalia.
 --
 -- Home: menu em grade com as seis áreas do painel. Instalar e Remover cobrem
 -- Flatpak, pacotes nix (nix profile), ferramentas mise e web apps, sempre com o
 -- painel de
 -- preview lateral no estilo do antigo `fzf --preview 'flatpak remote-info'`.
--- O delta dos toggles vai para hosts/<host>/configuration.nix.
+-- Os toggles viram o valor direto em hosts/<host>/configuration.nix.
 
 local home = noctalia.getenv("HOME") or "~"
 
@@ -70,11 +70,11 @@ local function desktopDir()
 end
 
 local function notify(text)
-  noctalia.notify("Hamra Control", text)
+  noctalia.notify("ControlFreak", text)
 end
 
 local function notifyError(text)
-  noctalia.notifyError("Hamra Control", text)
+  noctalia.notifyError("ControlFreak", text)
 end
 
 -- declarações adiantadas (usadas por funções definidas antes delas)
@@ -562,7 +562,7 @@ local function gpgTest()
         .. shq(keyId)
         .. " 2>/dev/null | awk -F: '$1==\"fpr\"{print $10; exit}'); "
         .. "if [ -n \"$fpr\" ]; then echo \"$fpr:6:\" | gpg --batch --yes --import-ownertrust 2>/dev/null; fi; "
-        .. "echo 'hamra-control test "
+        .. "echo 'controlfreak test "
         .. os.date("!%Y-%m-%dT%H:%M:%SZ")
         .. "' | gpg --batch --yes --clearsign -u "
         .. shq(keyId)
@@ -597,7 +597,7 @@ local function gpgImport()
   end
   gpgImportBusy = true
   render()
-  local tmp = home .. "/.gnupg/hamra-import.asc"
+  local tmp = home .. "/.gnupg/controlfreak-import.asc"
   noctalia.runAsync("mkdir -p " .. shq(home .. "/.gnupg") .. " && chmod 700 " .. shq(home .. "/.gnupg"), function(res)
     if res.exitCode ~= 0 then
       gpgImportBusy = false
@@ -712,10 +712,11 @@ local function renderKeys()
     table.insert(gpgBlock, ui.label({ text = gpgTestText, fontSize = 11, maxLines = 18, color = "on_surface_variant" }))
   end
 
-  table.insert(children, ui.column({ gap = 8 }, sshBlock))
-  table.insert(children, ui.separator({ spacing = 4 }))
-  table.insert(children, ui.column({ gap = 8 }, gpgBlock))
-  table.insert(children, ui.spacer({ flexGrow = 1 }))
+  table.insert(children, ui.scroll({ flexGrow = 1, gap = 12 }, {
+    ui.column({ gap = 8 }, sshBlock),
+    ui.separator({ spacing = 4 }),
+    ui.column({ gap = 8 }, gpgBlock),
+  }))
 
   return ui.column({ flexGrow = 1, gap = 10, align = "stretch" }, children)
 end
@@ -1288,11 +1289,32 @@ local function loadInstalledSets()
   end, 60000)
 end
 
+local liveGen = 0
+
+local function debouncedSearch(query, fire)
+  liveGen = liveGen + 1
+  local gen = liveGen
+  local q = trim(query or "")
+  if #q < 2 then
+    return
+  end
+  noctalia.runAsync("sleep 0.45", function()
+    if gen ~= liveGen then
+      return
+    end
+    fire(q)
+  end, 5000)
+end
+
 local function flatSearch(q)
+  liveGen = liveGen + 1
   flSearching = true
   flError = nil
   render()
   noctalia.runAsync("flatpak search --columns=application,name,description " .. shq(q), function(res)
+    if q ~= flQuery then
+      return
+    end
     flSearching = false
     local items = {}
     if res.exitCode == 0 then
@@ -1320,10 +1342,14 @@ local function flatSearch(q)
 end
 
 local function nixSearch(q)
+  liveGen = liveGen + 1
   nxSearching = true
   nxError = nil
   render()
   noctalia.runAsync("nix search nixpkgs " .. shq(q) .. " --json", function(res)
+    if q ~= nxQuery then
+      return
+    end
     nxSearching = false
     if res.exitCode ~= 0 then
       nxResults = {}
@@ -1394,10 +1420,14 @@ local function nixInstall(attr)
 end
 
 local function miseSearch(q)
+  liveGen = liveGen + 1
   mxSearching = true
   mxError = nil
   render()
   noctalia.runAsync("mise search --no-header " .. shq(q), function(res)
+    if q ~= mxQuery then
+      return
+    end
     mxSearching = false
     local items = {}
     if res.exitCode == 0 then
@@ -1426,6 +1456,42 @@ local function miseSearch(q)
     resetSelection()
     render()
   end, 60000)
+end
+
+local function onFlType(v)
+  flQuery = v or ""
+  liveGen = liveGen + 1
+  if trim(flQuery) == "" then
+    flResults = {}
+    flError = nil
+    render()
+    return
+  end
+  debouncedSearch(flQuery, flatSearch)
+end
+
+local function onNxType(v)
+  nxQuery = v or ""
+  liveGen = liveGen + 1
+  if trim(nxQuery) == "" then
+    nxResults = {}
+    nxError = nil
+    render()
+    return
+  end
+  debouncedSearch(nxQuery, nixSearch)
+end
+
+local function onMxType(v)
+  mxQuery = v or ""
+  liveGen = liveGen + 1
+  if trim(mxQuery) == "" then
+    mxResults = {}
+    mxError = nil
+    render()
+    return
+  end
+  debouncedSearch(mxQuery, miseSearch)
 end
 
 local function miseInstall(name)
@@ -1818,7 +1884,7 @@ local function renderInstall()
       "inst-search-flatpak",
       flQuery,
       "Buscar app no Flathub (ex.: vlc)...",
-      function(v) flQuery = v or "" end,
+      onFlType,
       "onFlSubmit",
       "onFlSearch",
       flSearching
@@ -1844,7 +1910,7 @@ local function renderInstall()
       "inst-search-nix",
       nxQuery,
       "Buscar pacote no nixpkgs (ex.: ripgrep)...",
-      function(v) nxQuery = v or "" end,
+      onNxType,
       "onNxSubmit",
       "onNxSearch",
       nxSearching
@@ -1870,7 +1936,7 @@ local function renderInstall()
       "inst-search-mise",
       mxQuery,
       "Buscar ferramenta no registry do mise (ex.: node)...",
-      function(v) mxQuery = v or "" end,
+      onMxType,
       "onMxSubmit",
       "onMxSearch",
       mxSearching
@@ -2496,7 +2562,7 @@ local function renderHome()
   return ui.column({ flexGrow = 1, gap = 14, align = "stretch" }, {
     ui.row({ align = "center", gap = 8 }, {
       ui.glyph({ name = "adjustments", size = 18, color = "primary" }),
-      ui.label({ text = "Hamra Control", fontSize = 18, fontWeight = "bold", flexGrow = 1 }),
+      ui.label({ text = "ControlFreak", fontSize = 18, fontWeight = "bold", flexGrow = 1 }),
       ui.button({ glyph = "close", variant = "ghost", tooltip = "Fechar", onClick = function() panel.close() end }),
     }),
     ui.label({ text = "Host: " .. host .. "  ·  " .. repo, fontSize = 11, color = "on_surface_variant" }),
@@ -2504,7 +2570,7 @@ local function renderHome()
     ui.column({ gap = 10, align = "stretch" }, rows),
     ui.spacer({ flexGrow = 1 }),
     ui.column({ gap = 8 }, footer),
-    hint("Atalho: Alt+Space · ou digite /hamra no launcher."),
+    hint("Atalho: Alt+Space · ou digite /controlfreak no launcher."),
   })
 end
 
@@ -2763,7 +2829,7 @@ function onSysRollback()
   render()
 end
 
--- Controle externo via `noctalia msg plugin gabrielnathan929/hamra-control:main all <evento> [payload]`:
+-- Controle externo via `noctalia msg plugin gabrielnathan929/controlfreak:main all <evento> [payload]`:
 --   view   <id>        abre uma view (home, apps, install, remove, update, keys, system)
 --   tab    <view>:<tab> troca a aba (install:flatpak | install:nix | install:web | remove:...)
 --   search <origem> <q> busca e mostra o preview (flatpak | nix | mise)

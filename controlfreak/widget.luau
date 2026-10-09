@@ -1,9 +1,9 @@
 --!nonstrict
--- Hamra Control bar widget: opens the control-center panel on click and the
+-- ControlFreak bar widget: opens the control-center panel on click and the
 -- Install view on right click. Presentation comes from the widget settings
 -- declared in plugin.toml (icon + optional label).
 
-local PANEL_ID = "gabrielnathan929/hamra-control:main"
+local PANEL_ID = "gabrielnathan929/controlfreak:main"
 
 local glyph = noctalia.getConfig("glyph")
 local showLabel = noctalia.getConfig("show_label")

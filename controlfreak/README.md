@@ -1,4 +1,4 @@
-# Hamra Control
+# ControlFreak
 
 Control center for the Hamra (NixOS) config, inside Noctalia. It lists the
 `hamra.programs.*` toggles with their real eval state, groups SSH and GPG key
@@ -10,14 +10,14 @@ tools and exposes common system chores — replacing the old terminal `hamra-men
 
 | Field | Value |
 | --- | --- |
-| ID | `gabrielnathan929/hamra-control` |
+| ID | `gabrielnathan929/controlfreak` |
 | Entries | panel: `main`; widget: `control`; launcher provider: `menu` |
-| Launcher Prefix | `/hamra` |
+| Launcher Prefix | `/controlfreak` |
 
 Open the panel with:
 
 ```sh
-noctalia msg panel-toggle gabrielnathan929/hamra-control:main
+noctalia msg panel-toggle gabrielnathan929/controlfreak:main
 ```
 
 Or bind a key to the same command (Hamra binds `Alt+Space` next to the other
@@ -43,17 +43,17 @@ search ready.
 
 ## Usage
 
-Open the panel from the launcher by typing `/hamra` and picking an entry, or
+Open the panel from the launcher by typing `/controlfreak` and picking an entry, or
 with the IPC command above. The home screen shows the menu as a grid of cards:
 
 - **Aplicativos** — every `hamra.programs.*` boolean as a switch, grouped by
   tier (`optionals`, `core`) and category, read from the real `nix eval` of the
-  flake, with a name filter. Flipping a switch writes the delta into
-  `hosts/<host>/configuration.nix` (long form `programs.<key>` first, short key
-  as fallback, ambiguity refused); the `Rebuild (n)` button then runs
-  `nixos-rebuild switch`.
+  flake, with a name filter. Flipping a switch edits the value in place in
+  `hosts/<host>/configuration.nix` (every toggle is already there, true or
+  false); the `Rebuild (n)` button then runs `nixos-rebuild switch`.
 - **Instalar** — four tabs, each with a list on the left and a preview pane on
-  the right (the old `fzf --preview 'flatpak remote-info …'` view):
+  the right (the old `fzf --preview 'flatpak remote-info …'` view). Results
+  appear as you type (debounced); Enter or Buscar searches immediately:
   - **Flatpak** — search Flathub (`flatpak search`), the preview runs
     `flatpak remote-info flathub <id>`, and installing opens a terminal for the
     sudo password. Results already on the system are marked *instalado*.
@@ -107,14 +107,14 @@ the progress — those that need your sudo password keep it out of the panel.
 Every entry accepts events, which is handy for keybinds and scripts:
 
 ```sh
-noctalia msg plugin gabrielnathan929/hamra-control:main all view install
-noctalia msg plugin gabrielnathan929/hamra-control:main all tab install:nix
-noctalia msg plugin gabrielnathan929/hamra-control:main all search nix ripgrep
-noctalia msg plugin gabrielnathan929/hamra-control:main all search mise node
-noctalia msg plugin gabrielnathan929/hamra-control:main all select nx:ripgrep
-noctalia msg plugin gabrielnathan929/hamra-control:main all select upd:flake
-noctalia msg plugin gabrielnathan929/hamra-control:main all webapp-create Notes https://notes.example.com
-noctalia msg plugin gabrielnathan929/hamra-control:main all webapp-remove Notes.desktop
+noctalia msg plugin gabrielnathan929/controlfreak:main all view install
+noctalia msg plugin gabrielnathan929/controlfreak:main all tab install:nix
+noctalia msg plugin gabrielnathan929/controlfreak:main all search nix ripgrep
+noctalia msg plugin gabrielnathan929/controlfreak:main all search mise node
+noctalia msg plugin gabrielnathan929/controlfreak:main all select nx:ripgrep
+noctalia msg plugin gabrielnathan929/controlfreak:main all select upd:flake
+noctalia msg plugin gabrielnathan929/controlfreak:main all webapp-create Notes https://notes.example.com
+noctalia msg plugin gabrielnathan929/controlfreak:main all webapp-remove Notes.desktop
 ```
 
 `view` takes `home|apps|install|remove|update|keys|system`, `tab` takes
@@ -133,7 +133,7 @@ Bar widget settings (per widget instance):
 | --- | --- | --- | --- |
 | `glyph` | glyph | `adjustments` | Icon shown in the bar. |
 | `show_label` | bool | `false` | Show the text next to the icon. |
-| `label` | string | `Hamra` | Text shown when `show_label` is on. |
+| `label` | string | `ControlFreak` | Text shown when `show_label` is on. |
 
 ## Notes
 

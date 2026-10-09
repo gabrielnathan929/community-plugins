@@ -1,5 +1,5 @@
 {
-  "title": "Hamra Control",
+  "title": "ControlFreak",
   "menu": {
     "apps": {
       "label": "Aplicativos",
@@ -41,6 +41,6 @@
     }
   },
   "widget": {
-    "tooltip": "Hamra Control — clique para abrir o painel, clique direito para Instalar"
+    "tooltip": "ControlFreak — clique para abrir o painel, clique direito para Instalar"
   }
 }

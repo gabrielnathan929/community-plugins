@@ -1,6 +1,6 @@
 --!nonstrict
 
-local PANEL_ID = "gabrielnathan929/hamra-control:main"
+local PANEL_ID = "gabrielnathan929/controlfreak:main"
 
 local MENU = {
   { id = "apps", label = "Aplicativos", glyph = "app-window", sub = "Toggles do hamra.programs" },
@@ -44,19 +44,19 @@ function onQuery(query)
       rows[#rows + 1] = {
         id = "search-flathub:" .. text,
         title = "Buscar '" .. text .. "' no Flathub",
-        subtitle = "Abre Hamra Control › Instalar › Flatpak",
+        subtitle = "Abre ControlFreak › Instalar › Flatpak",
         glyph = "box",
       }
       rows[#rows + 1] = {
         id = "search-nix:" .. text,
         title = "Buscar '" .. text .. "' no nixpkgs",
-        subtitle = "Abre Hamra Control › Instalar › Nix",
+        subtitle = "Abre ControlFreak › Instalar › Nix",
         glyph = "package",
       }
       rows[#rows + 1] = {
         id = "search-mise:" .. text,
         title = "Buscar '" .. text .. "' no mise",
-        subtitle = "Abre Hamra Control › Instalar › Mise",
+        subtitle = "Abre ControlFreak › Instalar › Mise",
         glyph = "tool",
       }
     end

@@ -1,5 +1,5 @@
-id = "gabrielnathan929/hamra-control"
-name = "Hamra Control"
+id = "gabrielnathan929/controlfreak"
+name = "ControlFreak"
 version = "0.6.0"
 plugin_api = 3
 author = "gabrielnathan929"
@@ -40,11 +40,11 @@ entry = "widget.luau"
   type = "string"
   label_key = "settings.label.label"
   description_key = "settings.label.description"
-  default = "Hamra"
+  default = "ControlFreak"
   visible_when = { key = "show_label", values = ["true"] }
 
 [[launcher_provider]]
 id = "menu"
 entry = "launcher.luau"
-prefix = "hamra"
+prefix = "controlfreak"
 include_in_global_search = false
