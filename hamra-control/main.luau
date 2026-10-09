@@ -394,6 +394,16 @@ end
 
 local sshEmail = ""
 local sshPubs = {}
+local sshImportName = "id_ed25519"
+local sshImportText = ""
+local sshImportNonce = 0
+local sshImportBusy = false
+local sshTestText = nil
+local sshTestBusy = false
+local gpgImportText = ""
+local gpgImportNonce = 0
+local gpgImportBusy = false
+local gpgTestText = nil
 
 local function loadSshPubs()
   sshPubs = {}
@@ -436,6 +446,87 @@ local function sshGenerate()
   runInTerminal("mkdir -p ~/.ssh && chmod 700 ~/.ssh && ssh-keygen -t ed25519 -C " .. shq(email) .. " -f " .. shq(keyPath))
 end
 
+local function sshTestKey()
+  sshTestBusy = true
+  render()
+  noctalia.runAsync("ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new git@github.com 2>&1; true", function(res)
+    sshTestBusy = false
+    local out = trim(res.stdout or "")
+    if out == "" then
+      out = "(sem saída — verifique a rede)"
+    end
+    sshTestText = "ssh -T git@github.com:\n" .. out
+    render()
+  end)
+end
+
+local function sshImport()
+  local name = trim(sshImportName)
+  if name == "" then
+    name = "id_ed25519"
+  end
+  if not name:match("^[%w%.%_%-]+$") then
+    notifyError("Nome de arquivo inválido (use letras, números, ponto, _ ou -).")
+    return
+  end
+  local text = trim(sshImportText)
+  if text == "" then
+    notifyError("Cole a chave privada no campo abaixo.")
+    return
+  end
+  if not text:find("PRIVATE KEY") then
+    notifyError("O conteúdo não parece uma chave privada (falta o bloco PRIVATE KEY).")
+    return
+  end
+  if text:sub(-1) ~= "\n" then
+    text = text .. "\n"
+  end
+  local dest = home .. "/.ssh/" .. name
+  if noctalia.fileExists(dest) then
+    notifyError("Já existe " .. dest .. " — apague ou escolha outro nome.")
+    return
+  end
+  sshImportBusy = true
+  render()
+  noctalia.runAsync("mkdir -p " .. shq(home .. "/.ssh") .. " && chmod 700 " .. shq(home .. "/.ssh"), function(res)
+    if res.exitCode ~= 0 then
+      sshImportBusy = false
+      notifyError("Não consegui preparar ~/.ssh: " .. trim(res.stderr))
+      render()
+      return
+    end
+    noctalia.writeFile(dest, text)
+    noctalia.runAsync(
+      "chmod 600 " .. shq(dest)
+        .. " && ssh-keygen -y -f " .. shq(dest) .. " > " .. shq(dest .. ".pub")
+        .. " && chmod 644 " .. shq(dest .. ".pub"),
+      function(res2)
+        sshImportBusy = false
+        if res2.exitCode ~= 0 then
+          notifyError("Chave rejeitada (senha ou formato?): " .. trim(res2.stderr))
+          render()
+          return
+        end
+        sshImportText = ""
+        sshImportNonce = sshImportNonce + 1
+        loadSshPubs()
+        notify(name .. " instalada (600) + .pub gerada. Adicionando ao agent e testando…")
+        render()
+        noctalia.runAsync("ssh-add " .. shq(dest) .. " 2>&1", function(res3)
+          local addOut = trim((res3.stdout or "") .. "\n" .. (res3.stderr or ""))
+          if res3.exitCode == 0 then
+            sshTestText = "ssh-add " .. name .. ": ok\n" .. addOut
+          else
+            sshTestText = "ssh-add " .. name .. " falhou (chave com senha? rode ssh-add no terminal):\n" .. addOut
+          end
+          render()
+          sshTestKey()
+        end)
+      end
+    )
+  end)
+end
+
 local function setGitSigning()
   gpgBusy = true
   render()
@@ -454,6 +545,83 @@ local function setGitSigning()
         notifyError("git config falhou: " .. trim(res2.stderr))
       end
       render()
+    end)
+  end)
+end
+
+local function gpgTest()
+  noctalia.runAsync("gpg --list-secret-keys --with-colons 2>/dev/null | awk -F: '$1==\"sec\"{print $5; exit}'", function(res)
+    local keyId = trim(res.stdout or "")
+    if keyId == "" then
+      gpgTestText = "Nenhuma chave secreta para testar."
+      render()
+      return
+    end
+    noctalia.runAsync(
+      "fpr=$(gpg --list-secret-keys --with-colons "
+        .. shq(keyId)
+        .. " 2>/dev/null | awk -F: '$1==\"fpr\"{print $10; exit}'); "
+        .. "if [ -n \"$fpr\" ]; then echo \"$fpr:6:\" | gpg --batch --yes --import-ownertrust 2>/dev/null; fi; "
+        .. "echo 'hamra-control test "
+        .. os.date("!%Y-%m-%dT%H:%M:%SZ")
+        .. "' | gpg --batch --yes --clearsign -u "
+        .. shq(keyId)
+        .. " 2>&1 | head -20",
+      function(res2)
+        local out = trim(res2.stdout or "")
+        if res2.exitCode == 0 then
+          gpgTestText = "Teste clearsign ok (chave " .. keyId .. "):\n" .. out
+          notify("GPG funcionando: mensagem assinada com " .. keyId)
+        else
+          gpgTestText = "Teste clearsign falhou (chave " .. keyId .. "):\n" .. out
+          notifyError("GPG importou mas o teste falhou — veja abaixo.")
+        end
+        render()
+      end
+    )
+  end)
+end
+
+local function gpgImport()
+  local text = trim(gpgImportText)
+  if text == "" then
+    notifyError("Cole o bloco ASCII-armored da chave GPG.")
+    return
+  end
+  if not text:find("PGP PRIVATE KEY BLOCK") then
+    notifyError("O conteúdo não parece uma chave privada GPG (falta PGP PRIVATE KEY BLOCK).")
+    return
+  end
+  if text:sub(-1) ~= "\n" then
+    text = text .. "\n"
+  end
+  gpgImportBusy = true
+  render()
+  local tmp = home .. "/.gnupg/hamra-import.asc"
+  noctalia.runAsync("mkdir -p " .. shq(home .. "/.gnupg") .. " && chmod 700 " .. shq(home .. "/.gnupg"), function(res)
+    if res.exitCode ~= 0 then
+      gpgImportBusy = false
+      notifyError("Não consegui preparar ~/.gnupg: " .. trim(res.stderr))
+      render()
+      return
+    end
+    noctalia.writeFile(tmp, text)
+    noctalia.runAsync("gpg --batch --import " .. shq(tmp) .. " 2>&1; rm -f " .. shq(tmp), function(res2)
+      gpgImportBusy = false
+      local out = trim(res2.stdout or "")
+      gpgImportText = ""
+      gpgImportNonce = gpgImportNonce + 1
+      if res2.exitCode ~= 0 then
+        gpgTestText = "gpg --import falhou:\n" .. out
+        notifyError("Importação GPG falhou — veja o resultado abaixo.")
+        render()
+        return
+      end
+      gpgTestText = "gpg --import ok:\n" .. out
+      notify("Chave GPG importada. Listando e testando…")
+      render()
+      onGpgList()
+      gpgTest()
     end)
   end)
 end
@@ -490,6 +658,29 @@ local function renderKeys()
       }))
     end
   end
+  table.insert(sshBlock, ui.separator({ spacing = 4 }))
+  table.insert(sshBlock, ui.label({ text = "Importar chave privada (colar)", fontSize = 12, fontWeight = "bold", color = "primary" }))
+  table.insert(sshBlock, ui.input({
+    key = "ssh-import-name",
+    value = sshImportName,
+    placeholder = "nome do arquivo (id_ed25519)",
+    onChange = function(v) sshImportName = v or "" end,
+  }))
+  table.insert(sshBlock, ui.input({
+    key = "ssh-import-text-" .. tostring(sshImportNonce),
+    value = "",
+    placeholder = "cole aqui -----BEGIN OPENSSH PRIVATE KEY----- …",
+    multiline = true,
+    height = 120,
+    onChange = function(v) sshImportText = v or "" end,
+  }))
+  table.insert(sshBlock, ui.row({ align = "center", gap = 8 }, {
+    ui.button({ text = "Importar privada", glyph = "download", onClick = "onSshImport", enabled = not sshImportBusy }),
+    ui.button({ text = "Testar GitHub", glyph = "check", onClick = "onSshTest", enabled = not sshTestBusy }),
+  }))
+  if sshTestText ~= nil then
+    table.insert(sshBlock, ui.label({ text = sshTestText, fontSize = 11, maxLines = 12, color = "on_surface_variant" }))
+  end
 
   local gpgBlock = {
     ui.label({ text = "GPG", fontSize = 14, fontWeight = "bold", color = "primary" }),
@@ -502,6 +693,23 @@ local function renderKeys()
   }
   if gpgListText ~= nil then
     table.insert(gpgBlock, ui.label({ text = gpgListText, fontSize = 11, maxLines = 18, color = "on_surface_variant" }))
+  end
+  table.insert(gpgBlock, ui.separator({ spacing = 4 }))
+  table.insert(gpgBlock, ui.label({ text = "Importar chave privada (colar)", fontSize = 12, fontWeight = "bold", color = "primary" }))
+  table.insert(gpgBlock, ui.input({
+    key = "gpg-import-text-" .. tostring(gpgImportNonce),
+    value = "",
+    placeholder = "cole aqui -----BEGIN PGP PRIVATE KEY BLOCK----- …",
+    multiline = true,
+    height = 120,
+    onChange = function(v) gpgImportText = v or "" end,
+  }))
+  table.insert(gpgBlock, ui.row({ align = "center", gap = 8 }, {
+    ui.button({ text = "Importar privada", glyph = "download", onClick = "onGpgImport", enabled = not gpgImportBusy }),
+    ui.button({ text = "Testar assinatura", glyph = "check", onClick = "onGpgTest" }),
+  }))
+  if gpgTestText ~= nil then
+    table.insert(gpgBlock, ui.label({ text = gpgTestText, fontSize = 11, maxLines = 18, color = "on_surface_variant" }))
   end
 
   table.insert(children, ui.column({ gap = 8 }, sshBlock))
@@ -2391,6 +2599,14 @@ function onSshAgent()
   runInTerminal("ssh-add " .. shq(home .. "/.ssh/id_ed25519") .. " 2>/dev/null || ssh-add")
 end
 
+function onSshImport()
+  sshImport()
+end
+
+function onSshTest()
+  sshTestKey()
+end
+
 function onSshEditConfig()
   runInTerminal("mkdir -p ~/.ssh && touch ~/.ssh/config && " .. editorExec .. " ~/.ssh/config")
 end
@@ -2414,6 +2630,14 @@ end
 
 function onGpgGitSign()
   setGitSigning()
+end
+
+function onGpgImport()
+  gpgImport()
+end
+
+function onGpgTest()
+  gpgTest()
 end
 
 function onGpgEditAgent()
