@@ -93,6 +93,7 @@ local MENU = {
   { id = "update", label = "Atualizar", glyph = "refresh", sub = "flake update, mise e rebuild" },
   { id = "keys", label = "Chaves", glyph = "key", sub = "SSH e GPG" },
   { id = "system", label = "Sistema", glyph = "settings", sub = "Info, gerações, GC, rollback" },
+  { id = "capture", label = "Captura", glyph = "camera", sub = "Gravar tela e capturas de tela" },
 }
 
 local function runInTerminal(cmd)
@@ -2542,6 +2543,9 @@ local function renderHome()
     for j = i, math.min(i + 2, #MENU) do
       table.insert(row, menuCard(MENU[j]))
     end
+    for _ = #row, 2 do
+      table.insert(row, ui.spacer({ flexGrow = 1 }))
+    end
     table.insert(rows, ui.row({ gap = 10, align = "stretch" }, row))
   end
 
@@ -2574,6 +2578,88 @@ local function renderHome()
   })
 end
 
+-- ── Captura (gravação de tela e screenshots) ────────────────────────────────
+
+local captureRecording = false
+
+local function captureRefresh()
+  noctalia.runAsync(
+    "pgrep -f '^(/nix/store/.*-)?gpu-screen-recorder' >/dev/null 2>&1 && echo recording || echo idle",
+    function(res)
+      captureRecording = trim(res.stdout or "") == "recording"
+      if view == "capture" then
+        render()
+      end
+    end
+  )
+end
+
+local function captureRun(cmd)
+  noctalia.runAsync(cmd, function(res)
+    if res.exitCode ~= 0 then
+      local err = trim(res.stderr or "")
+      notifyError(err ~= "" and err or ("Falhou: " .. cmd))
+    end
+    captureRefresh()
+  end)
+end
+
+local function captureAction(label, glyph, cmd)
+  return ui.button({
+    text = label,
+    glyph = glyph,
+    variant = "outline",
+    flexGrow = 1,
+    onClick = function() captureRun(cmd) end,
+  })
+end
+
+local function renderCapture()
+  local children = {
+    header("Captura", {
+      ui.button({ glyph = "reload", variant = "ghost", tooltip = "Atualizar", onClick = function() captureRefresh() end }),
+    }),
+    ui.row({ align = "center", gap = 8 }, {
+      ui.glyph({
+        name = captureRecording and "video" or "video-off",
+        size = 16,
+        color = captureRecording and "error" or "on_surface_variant",
+      }),
+      ui.label({
+        text = captureRecording and "Gravando agora." or "Nenhuma gravação em andamento.",
+        fontSize = 12,
+        flexGrow = 1,
+      }),
+      ui.button({
+        text = "Parar",
+        glyph = "player-stop",
+        variant = captureRecording and "destructive" or "outline",
+        enabled = captureRecording,
+        onClick = function() captureRun("capture stop") end,
+      }),
+    }),
+    ui.separator({ spacing = 6 }),
+    ui.label({ text = "Gravar tela", fontSize = 14, fontWeight = "bold", color = "primary" }),
+    ui.column({ gap = 8, align = "stretch" }, {
+      captureAction("Sem áudio", "volume-off", "capture record none"),
+      captureAction("Áudio do sistema", "volume", "capture record desktop"),
+      captureAction("Sistema + microfone", "microphone", "capture record both"),
+      captureAction("Sistema + microfone + webcam", "camera", "capture record webcam"),
+    }),
+    ui.separator({ spacing = 6 }),
+    ui.label({ text = "Captura de tela", fontSize = 14, fontWeight = "bold", color = "primary" }),
+    ui.column({ gap = 8, align = "stretch" }, {
+      captureAction("Região", "crop", "capture screenshot region"),
+      captureAction("Janela", "app-window", "capture screenshot window"),
+      captureAction("Monitor", "device-desktop", "capture screenshot monitor"),
+      captureAction("Anotar região", "pencil", "capture screenshot annotate"),
+    }),
+    hint("Grava em ~/noctalia/records. Capturas seguem as preferências do Noctalia (salvar + copiar)."),
+  }
+
+  return ui.column({ flexGrow = 1, gap = 10, align = "stretch" }, children)
+end
+
 -- ── render / navegação ──────────────────────────────────────────────────────
 
 render = function()
@@ -2590,6 +2676,8 @@ render = function()
     content = renderUpdate()
   elseif view == "system" then
     content = renderSystem()
+  elseif view == "capture" then
+    content = renderCapture()
   else
     content = renderHome()
   end
@@ -2625,6 +2713,8 @@ openView = function(id)
     end
   elseif id == "update" and miseOutdated == nil and not miseOutdatedLoading then
     loadMiseOutdated()
+  elseif id == "capture" then
+    captureRefresh()
   end
   render()
 end

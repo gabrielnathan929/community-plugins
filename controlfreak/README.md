@@ -40,6 +40,9 @@ search ready.
 - Write access to `hosts/<host>/configuration.nix` for the toggle switches (when
   the repo lives in `/etc/nixos`, make the file writable for your user, e.g. via
   a `wheel` group).
+- The `capture` command (from `hamra.programs.core.scripts.capture`) on `PATH`
+  for the **Captura** view — it wraps `gpu-screen-recorder` and the Noctalia
+  screenshot IPC.
 
 ## Usage
 
@@ -97,6 +100,15 @@ with the IPC command above. The home screen shows the menu as a grid of cards:
   the host's `configuration.nix`, and rollback to the previous generation with a
   two-step confirm), each task showing its command and effect in the preview
   pane before you run it.
+- **Captura** — screen recording and screenshots in one place, driven by the
+  `capture` command (Hamra's `hamra.programs.core.scripts.capture`). It shows
+  whether a recording is running and offers the four recording modes (no audio,
+  desktop audio, desktop + microphone, desktop + microphone + webcam) plus a
+  stop button, and the screenshot modes (region, window, monitor, annotate).
+  Recordings land in `~/noctalia/records`; screenshots follow the Noctalia
+  preferences (save to file and copy to clipboard). The same modes are available
+  from a terminal: `capture`, `capture record both`, `capture screenshot region`,
+  `capture stop`.
 
 Long-running actions (rebuild, `ssh-keygen`, flatpak install, nix profile
 install, `mise use`/`mise upgrade`, GC) spawn in a terminal so you can follow
@@ -117,7 +129,7 @@ noctalia msg plugin gabrielnathan929/controlfreak:main all webapp-create Notes h
 noctalia msg plugin gabrielnathan929/controlfreak:main all webapp-remove Notes.desktop
 ```
 
-`view` takes `home|apps|install|remove|update|keys|system`, `tab` takes
+`view` takes `home|apps|install|remove|update|keys|system|capture`, `tab` takes
 `<view>:<tab>`, `search` runs a search on `flatpak`, `nix` or `mise`, and
 `select` selects a row by key (`fl:`, `nx:`, `mx:`, `ifl:`, `inx:`, `imx:`,
 `web:`, `upd:`, `sys:`, `mo:`, `webnix:`) so the preview loads.

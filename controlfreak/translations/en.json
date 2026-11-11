@@ -24,6 +24,10 @@
     "system": {
       "label": "Sistema",
       "sub": "Info, gerações, GC, rollback"
+    },
+    "capture": {
+      "label": "Captura",
+      "sub": "Gravar tela e capturas de tela"
     }
   },
   "settings": {
