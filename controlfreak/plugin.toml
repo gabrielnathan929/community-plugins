@@ -1,6 +1,6 @@
 id = "gabrielnathan929/controlfreak"
 name = "ControlFreak"
-version = "0.7.0"
+version = "0.8.0"
 plugin_api = 3
 author = "gabrielnathan929"
 license = "MIT"
@@ -48,3 +48,18 @@ id = "menu"
 entry = "launcher.luau"
 prefix = "controlfreak"
 include_in_global_search = false
+
+[[launcher_provider]]
+id = "capture"
+entry = "launcher-capture.luau"
+prefix = "cap"
+glyph = "camera"
+include_in_global_search = false
+
+  [[launcher_provider.category]]
+  label = "Gravar"
+  glyph = "video"
+
+  [[launcher_provider.category]]
+  label = "Captura de tela"
+  glyph = "crop"

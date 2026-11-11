@@ -2581,12 +2581,24 @@ end
 -- ── Captura (gravação de tela e screenshots) ────────────────────────────────
 
 local captureRecording = false
+local captureStartMs = nil
+local hoveredCapture = nil
 
 local function captureRefresh()
   noctalia.runAsync(
-    "pgrep -f '^(/nix/store/.*-)?gpu-screen-recorder' >/dev/null 2>&1 && echo recording || echo idle",
+    "pid=$(pgrep -f "
+      .. shq("^(/nix/store/.*-)?gpu-screen-recorder")
+      .. " | head -n1); if [ -n \"$pid\" ]; then printf 'recording %s\\n' \"$(ps -o etimes= -p \"$pid\" | tr -d ' ')\"; else echo idle; fi",
     function(res)
-      captureRecording = trim(res.stdout or "") == "recording"
+      local state, secs = string.match(trim(res.stdout or ""), "^(%a+)%s*(%d*)$")
+      local active = state == "recording"
+      local elapsed = tonumber(secs)
+      if active and elapsed ~= nil then
+        captureStartMs = noctalia.nowMs() - elapsed * 1000
+      elseif not active then
+        captureStartMs = nil
+      end
+      captureRecording = active
       if view == "capture" then
         render()
       end
@@ -2604,60 +2616,151 @@ local function captureRun(cmd)
   end)
 end
 
-local function captureAction(label, glyph, cmd)
-  return ui.button({
-    text = label,
-    glyph = glyph,
-    variant = "outline",
+local function formatElapsed(ms)
+  local total = math.max(0, math.floor((ms or 0) / 1000))
+  local h = math.floor(total / 3600)
+  local m = math.floor((total % 3600) / 60)
+  local s = total % 60
+  if h > 0 then
+    return string.format("%d:%02d:%02d", h, m, s)
+  end
+  return string.format("%02d:%02d", m, s)
+end
+
+-- Cartão clicável: ícone, título e uma linha explicando o modo.
+local function captureTile(title, sub, glyph, cmd)
+  local hovered = hoveredCapture == cmd
+  return ui.column({
+    key = "capture-" .. cmd:gsub("%W", "-"),
     flexGrow = 1,
+    gap = 4,
+    padding = 12,
+    paddingV = 10,
+    align = "start",
+    fill = hovered and "primary/0.12" or "surface",
+    radius = 10,
+    border = hovered and "primary" or "outline",
+    borderWidth = 1,
+    onHover = function(state)
+      local id = (state == "true") and cmd or nil
+      if hoveredCapture ~= id then
+        hoveredCapture = id
+        render()
+      end
+    end,
     onClick = function() captureRun(cmd) end,
+  }, {
+    ui.glyph({ name = glyph, size = 20, color = hovered and "primary" or "on_surface_variant" }),
+    ui.label({ text = title, fontSize = 12, fontWeight = "bold", maxLines = 1 }),
+    ui.label({ text = sub, fontSize = 10, color = "on_surface_variant", maxLines = 2 }),
+  })
+end
+
+local function captureGrid(tiles)
+  local rows = {}
+  local i = 1
+  while i <= #tiles do
+    local pair = {tiles[i]}
+    if tiles[i + 1] ~= nil then
+      pair[#pair + 1] = tiles[i + 1]
+    end
+    rows[#rows + 1] = ui.row({ gap = 8, align = "stretch" }, pair)
+    i = i + 2
+  end
+  return rows
+end
+
+local function captureSection(title, tiles)
+  local children = {ui.label({ text = title, fontSize = 13, fontWeight = "bold", color = "primary" })}
+  for _, row in ipairs(captureGrid(tiles)) do
+    children[#children + 1] = row
+  end
+  return ui.column({ gap = 8, align = "stretch" }, children)
+end
+
+-- Cartão de estado: cor de erro enquanto grava, com o tempo decorrido.
+local function captureStatus()
+  local subtitle
+  if captureRecording then
+    local elapsed = captureStartMs ~= nil and formatElapsed(noctalia.nowMs() - captureStartMs) or ""
+    subtitle = elapsed ~= "" and ("Gravando há " .. elapsed) or "Gravação em andamento"
+  else
+    subtitle = "Escolha um modo abaixo para começar"
+  end
+
+  return ui.row({
+    align = "center",
+    gap = 12,
+    padding = 14,
+    paddingV = 12,
+    fill = captureRecording and "error/0.12" or "surface",
+    radius = 12,
+    border = captureRecording and "error" or "outline",
+    borderWidth = 1,
+  }, {
+    ui.glyph({
+      name = captureRecording and "video" or "video-off",
+      size = 22,
+      color = captureRecording and "error" or "on_surface_variant",
+    }),
+    ui.column({ gap = 2, flexGrow = 1 }, {
+      ui.label({ text = captureRecording and "Gravando agora" or "Pronto para gravar", fontSize = 13, fontWeight = "bold" }),
+      ui.label({ text = subtitle, fontSize = 10, color = "on_surface_variant", maxLines = 1 }),
+    }),
+    ui.button({
+      text = "Parar",
+      glyph = "player-stop",
+      variant = "destructive",
+      enabled = captureRecording,
+      onClick = function() captureRun("capture stop") end,
+    }),
+  })
+end
+
+local function captureFooter()
+  return ui.row({ align = "center", gap = 8 }, {
+    ui.label({
+      text = "Gravações em ~/noctalia/records · screenshots seguem as preferências do Noctalia",
+      fontSize = 10,
+      color = "on_surface_variant",
+      flexGrow = 1,
+      maxLines = 2,
+    }),
+    ui.button({
+      text = "Abrir pasta",
+      glyph = "folder-open",
+      variant = "ghost",
+      onClick = function()
+        noctalia.runAsync({"xdg-open", home .. "/noctalia/records"})
+      end,
+    }),
   })
 end
 
 local function renderCapture()
-  local children = {
+  local recordTiles = {
+    captureTile("Sem áudio", "Vídeo apenas", "volume-off", "capture record none"),
+    captureTile("Áudio do sistema", "Vídeo + áudio do desktop", "volume", "capture record desktop"),
+    captureTile("Sistema + microfone", "Vídeo + desktop + microfone", "microphone", "capture record both"),
+    captureTile("Sistema + microfone + webcam", "Vídeo + desktop + microfone + webcam flutuante", "camera", "capture record webcam"),
+  }
+  local shotTiles = {
+    captureTile("Região", "Selecionar uma área da tela", "crop", "capture screenshot region"),
+    captureTile("Janela", "A janela em foco", "app-window", "capture screenshot window"),
+    captureTile("Monitor", "O monitor em foco", "device-desktop", "capture screenshot monitor"),
+    captureTile("Anotar região", "Região + editor de anotações", "pencil", "capture screenshot annotate"),
+  }
+
+  return ui.column({ flexGrow = 1, gap = 12, align = "stretch" }, {
     header("Captura", {
       ui.button({ glyph = "reload", variant = "ghost", tooltip = "Atualizar", onClick = function() captureRefresh() end }),
     }),
-    ui.row({ align = "center", gap = 8 }, {
-      ui.glyph({
-        name = captureRecording and "video" or "video-off",
-        size = 16,
-        color = captureRecording and "error" or "on_surface_variant",
-      }),
-      ui.label({
-        text = captureRecording and "Gravando agora." or "Nenhuma gravação em andamento.",
-        fontSize = 12,
-        flexGrow = 1,
-      }),
-      ui.button({
-        text = "Parar",
-        glyph = "player-stop",
-        variant = captureRecording and "destructive" or "outline",
-        enabled = captureRecording,
-        onClick = function() captureRun("capture stop") end,
-      }),
-    }),
-    ui.separator({ spacing = 6 }),
-    ui.label({ text = "Gravar tela", fontSize = 14, fontWeight = "bold", color = "primary" }),
-    ui.column({ gap = 8, align = "stretch" }, {
-      captureAction("Sem áudio", "volume-off", "capture record none"),
-      captureAction("Áudio do sistema", "volume", "capture record desktop"),
-      captureAction("Sistema + microfone", "microphone", "capture record both"),
-      captureAction("Sistema + microfone + webcam", "camera", "capture record webcam"),
-    }),
-    ui.separator({ spacing = 6 }),
-    ui.label({ text = "Captura de tela", fontSize = 14, fontWeight = "bold", color = "primary" }),
-    ui.column({ gap = 8, align = "stretch" }, {
-      captureAction("Região", "crop", "capture screenshot region"),
-      captureAction("Janela", "app-window", "capture screenshot window"),
-      captureAction("Monitor", "device-desktop", "capture screenshot monitor"),
-      captureAction("Anotar região", "pencil", "capture screenshot annotate"),
-    }),
-    hint("Grava em ~/noctalia/records. Capturas seguem as preferências do Noctalia (salvar + copiar)."),
-  }
-
-  return ui.column({ flexGrow = 1, gap = 10, align = "stretch" }, children)
+    captureStatus(),
+    captureSection("Gravar tela", recordTiles),
+    captureSection("Captura de tela", shotTiles),
+    ui.spacer({ flexGrow = 1 }),
+    captureFooter(),
+  })
 end
 
 -- ── render / navegação ──────────────────────────────────────────────────────
@@ -3008,7 +3111,27 @@ function onIpc(event, payload)
   end
 end
 
-function onOpen(_)
+panel.setWantsSecondTicks(true)
+
+-- O host chama a cada segundo; só redesenha quando há um cronômetro correndo.
+function update()
+  if view == "capture" and captureRecording then
+    render()
+  end
+end
+
+function onOpen(context)
+  local ctx = type(context) == "string" and trim(context) or ""
+  if ctx == "home" then
+    openView("home")
+    return
+  end
+  for _, entry in ipairs(MENU) do
+    if entry.id == ctx then
+      openView(entry.id)
+      return
+    end
+  end
   local v = noctalia.state.get("hamra_view")
   if type(v) == "string" and v ~= "" then
     noctalia.state.set("hamra_view", "")

@@ -9,6 +9,7 @@ local MENU = {
   { id = "update", label = "Atualizar", glyph = "refresh", sub = "flake update, mise e rebuild" },
   { id = "keys", label = "Chaves", glyph = "key", sub = "SSH e GPG" },
   { id = "system", label = "Sistema", glyph = "settings", sub = "Info, gerações, GC, rollback" },
+  { id = "capture", label = "Captura", glyph = "camera", sub = "Gravar tela e capturas de tela" },
 }
 
 local function trim(s)

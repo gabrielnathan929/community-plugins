@@ -11,8 +11,8 @@ tools and exposes common system chores — replacing the old terminal `hamra-men
 | Field | Value |
 | --- | --- |
 | ID | `gabrielnathan929/controlfreak` |
-| Entries | panel: `main`; widget: `control`; launcher provider: `menu` |
-| Launcher Prefix | `/controlfreak` |
+| Entries | panel: `main`; widget: `control`; launcher providers: `menu`, `capture` |
+| Launcher Prefix | `/controlfreak`, `/cap` |
 
 Open the panel with:
 
@@ -101,18 +101,30 @@ with the IPC command above. The home screen shows the menu as a grid of cards:
   two-step confirm), each task showing its command and effect in the preview
   pane before you run it.
 - **Captura** — screen recording and screenshots in one place, driven by the
-  `capture` command (Hamra's `hamra.programs.core.scripts.capture`). It shows
-  whether a recording is running and offers the four recording modes (no audio,
-  desktop audio, desktop + microphone, desktop + microphone + webcam) plus a
-  stop button, and the screenshot modes (region, window, monitor, annotate).
-  Recordings land in `~/noctalia/records`; screenshots follow the Noctalia
-  preferences (save to file and copy to clipboard). The same modes are available
-  from a terminal: `capture`, `capture record both`, `capture screenshot region`,
-  `capture stop`.
+  `capture` command (Hamra's `hamra.programs.core.scripts.capture`). A status
+  card shows whether a recording is running and for how long, with a **Parar**
+  button; below it two grids of cards offer the four recording modes (no audio,
+  desktop audio, desktop + microphone, desktop + microphone + webcam) and the
+  four screenshot modes (region, window, monitor, annotate). Recordings land in
+  `~/noctalia/records` (with an **Abrir pasta** shortcut); screenshots follow the
+  Noctalia preferences (save to file and copy to clipboard). The same modes are
+  available from a terminal: `capture`, `capture record both`,
+  `capture screenshot region`, `capture stop`.
 
 Long-running actions (rebuild, `ssh-keygen`, flatpak install, nix profile
 install, `mise use`/`mise upgrade`, GC) spawn in a terminal so you can follow
 the progress — those that need your sudo password keep it out of the panel.
+
+## Launcher
+
+Two prefixes are registered:
+
+- **`/controlfreak`** — jump to any panel view (`Aplicativos`, `Instalar`, …,
+  `Captura`), or search Flathub/nixpkgs/mise when nothing matches.
+- **`/cap`** — the capture menu: one row per recording mode and per screenshot
+  mode, each with a subtitle explaining the audio source. While a recording is
+  running, `Parar gravação` is the first row. Hamra binds `Alt+Print` to
+  `noctalia msg panel-toggle launcher '/cap '`.
 
 ## IPC
 
@@ -127,6 +139,7 @@ noctalia msg plugin gabrielnathan929/controlfreak:main all select nx:ripgrep
 noctalia msg plugin gabrielnathan929/controlfreak:main all select upd:flake
 noctalia msg plugin gabrielnathan929/controlfreak:main all webapp-create Notes https://notes.example.com
 noctalia msg plugin gabrielnathan929/controlfreak:main all webapp-remove Notes.desktop
+noctalia msg panel-open gabrielnathan929/controlfreak:main capture
 ```
 
 `view` takes `home|apps|install|remove|update|keys|system|capture`, `tab` takes
@@ -135,7 +148,8 @@ noctalia msg plugin gabrielnathan929/controlfreak:main all webapp-remove Notes.d
 `web:`, `upd:`, `sys:`, `mo:`, `webnix:`) so the preview loads.
 `webapp-create` creates an imperative web app (same flow as the button) and
 `webapp-remove` deletes one by `.desktop` file or name (Nix-declared web apps
-are not removable this way).
+are not removable this way). The panel-open context (`panel-open … capture`)
+lands straight on that view.
 
 ## Settings
 
