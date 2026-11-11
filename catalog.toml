@@ -5838,8 +5838,8 @@ tags = ["bar", "panel", "service", "productivity", "time", "countdown"]
 [[plugin]]
 id = "gabrielnathan929/controlfreak"
 name = "ControlFreak"
-version = "0.6.0"
-updated_at = 1791567607
+version = "0.7.0"
+updated_at = 1794428930
 added_at = 1791567607
 author = "gabrielnathan929"
 license = "MIT"
