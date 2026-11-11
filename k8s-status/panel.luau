@@ -10,6 +10,7 @@ local snapshot = noctalia.state.get(STATE_KEY) or {
   loading = true,
   busy = false,
   context = "",
+  contexts = {},
   nodes = {},
   pods = {},
   deployments = {},
@@ -231,7 +232,7 @@ local function toolbar()
     if not node then
       return ui.label({ text = tr("panel.select_hint"), color = "on_surface_variant" })
     end
-    return ui.column({ gap = 4, padding = 10, fill = "surface_variant/0.45", radius = 10 }, {
+    return ui.column({ gap = 4, padding = 10, fill = "surface_container/0.45", radius = 10 }, {
       ui.row({ gap = 8, align = "center" }, {
         ui.glyph({ name = ICON_NODE, size = 18, color = statusColor(node.ready) }),
         ui.label({ text = node.name, fontWeight = "bold", flexGrow = 1, maxLines = 1 }),
@@ -256,7 +257,7 @@ local function toolbar()
     if not pod then
       return ui.label({ text = tr("panel.select_hint"), color = "on_surface_variant" })
     end
-    return ui.column({ gap = 4, padding = 10, fill = "surface_variant/0.45", radius = 10 }, {
+    return ui.column({ gap = 4, padding = 10, fill = "surface_container/0.45", radius = 10 }, {
       ui.row({ gap = 8, align = "center" }, {
         ui.glyph({ name = ICON_POD, size = 18, color = statusColor(not pod.problem) }),
         ui.label({ text = `{pod.namespace}/{pod.name}`, fontWeight = "bold", flexGrow = 1, maxLines = 1 }),
@@ -286,7 +287,7 @@ local function toolbar()
     if not dep then
       return ui.label({ text = tr("panel.select_hint"), color = "on_surface_variant" })
     end
-    return ui.column({ gap = 4, padding = 10, fill = "surface_variant/0.45", radius = 10 }, {
+    return ui.column({ gap = 4, padding = 10, fill = "surface_container/0.45", radius = 10 }, {
       ui.row({ gap = 8, align = "center" }, {
         ui.glyph({ name = ICON_DEPLOY, size = 18, color = statusColor(not dep.problem) }),
         ui.label({ text = `{dep.namespace}/{dep.name}`, fontWeight = "bold", flexGrow = 1, maxLines = 1 }),
@@ -307,7 +308,7 @@ local function toolbar()
   if not ns then
     return ui.label({ text = tr("panel.select_hint"), color = "on_surface_variant" })
   end
-  return ui.column({ gap = 4, padding = 10, fill = "surface_variant/0.45", radius = 10 }, {
+  return ui.column({ gap = 4, padding = 10, fill = "surface_container/0.45", radius = 10 }, {
     ui.row({ gap = 8, align = "center" }, {
       ui.glyph({ name = ICON_NS, size = 18, color = "primary" }),
       ui.label({ text = ns.name, fontWeight = "bold", flexGrow = 1, maxLines = 1 }),
@@ -455,6 +456,45 @@ local function filterPlaceholder()
   return tr("filter.placeholder_namespaces")
 end
 
+-- Context switcher: a select when the kubeconfig offers multiple contexts and the
+-- "context" setting does not pin one; otherwise the plain read-only label.
+local function contextControl()
+  local pinned = noctalia.string.trim(noctalia.getConfig("context") or "") ~= ""
+  local contexts = snapshot.contexts or {}
+  if pinned or #contexts < 2 then
+    return ui.label({
+      text = tr("panel.context", { name = snapshot.context ~= "" and snapshot.context or "—" }),
+      fontSize = 11,
+      color = "on_surface_variant",
+    })
+  end
+  local selected = 0
+  for i, name in ipairs(contexts) do
+    if name == snapshot.context then
+      selected = i
+      break
+    end
+  end
+  -- Fixed width inside a row + spacer: the title column stretches children to its
+  -- full width, so an unwrapped select would push the header buttons out of line.
+  return ui.row({ align = "center" }, {
+    ui.select({
+      options = contexts,
+      -- selectedIndex is 0-based on the host side; ipairs is 1-based.
+      selectedIndex = selected > 0 and (selected - 1) or nil,
+      placeholder = snapshot.context ~= "" and snapshot.context or "—",
+      controlSize = "sm",
+      width = 220,
+      onChange = function(_, text)
+        if type(text) == "string" and text ~= "" and text ~= snapshot.context then
+          sendCommand("use_context", { context = text })
+        end
+      end,
+    }),
+    ui.spacer({ flexGrow = 1 }),
+  })
+end
+
 render = function()
   dirty = false
   local statusRows = {}
@@ -491,11 +531,7 @@ render = function()
       }),
       ui.column({ flexGrow = 1, gap = 0 }, {
         ui.label({ text = tr("title"), fontSize = 18, fontWeight = "bold" }),
-        ui.label({
-          text = tr("panel.context", { name = snapshot.context ~= "" and snapshot.context or "—" }),
-          fontSize = 11,
-          color = "on_surface_variant",
-        }),
+        contextControl(),
       }),
       ui.button({
         text = tr("actions.open_k9s"),

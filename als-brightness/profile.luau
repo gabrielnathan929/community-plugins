@@ -63,7 +63,8 @@ do
   is_finite = mod.is_finite
 end
 
---- A fresh, empty profile.
+--- A fresh, empty profile. Curve state only: the keyboard threshold anchor is
+--- exact (keyboard.luau) and carries no learned multiplier.
 function M.new()
   return { version = 1, observations = {}, nodes = {}, updated_at = nil }
 end
@@ -205,6 +206,9 @@ function M.sanitise(value)
     end
   end
 
+  -- A legacy `kbd_scale` key (the retired learned threshold multiplier) is
+  -- deliberately dropped: the anchor is exact again, and a stale 2.0 in an old
+  -- profile.json must not survive the round trip to haunt the threshold.
   return clean
 end
 

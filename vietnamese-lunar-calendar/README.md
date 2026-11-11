@@ -4,7 +4,7 @@ A small Noctalia v5 plugin for the **Vietnamese lunar calendar**.
 
 It provides:
 
-- a Control Center shortcut named **Âm lịch**
+- a Control Center shortcut named **Lunar Calendar**
 - an attached monthly calendar panel that opens near its trigger
 - lunar day/month shown below each Gregorian date
 - leap-month marker (`N`)
@@ -18,7 +18,7 @@ It provides:
 | Field | Value |
 | --- | --- |
 | ID | `notoxus/vietnamese-lunar-calendar` |
-| Entries | Bar widget: `lunar`; panel: `calendar`; shortcut: `calendar-shortcut` |
+| Entries | Bar widget: `lunar`; desktop widget: `calendar-desktop`; panel: `calendar`; shortcut: `calendar-shortcut` |
 | Time zone used for lunar calculation | UTC+7 |
 
 ## Usage
@@ -35,7 +35,7 @@ Or enable it from the command line:
 noctalia msg plugins enable notoxus/vietnamese-lunar-calendar
 ```
 
-Add the **Âm lịch** shortcut from:
+Add the **Lunar Calendar** shortcut from:
 
 ```text
 Settings → Control Center → Shortcuts
@@ -51,7 +51,7 @@ noctalia msg panel-toggle notoxus/vietnamese-lunar-calendar:calendar
 ```
 
 Click any date in the calendar to inspect its lunar date. Use the arrow buttons
-to change month and **Hôm nay** to return to the current date.
+to change month and **Today** to return to the current date.
 
 ## Settings
 
@@ -87,3 +87,9 @@ no external dependencies.
 Traditional festival labels are intentionally lightweight; regional or
 religious observances can be added later without changing the calendar
 conversion logic.
+
+## Desktop widget
+
+Enable the plugin, then open Noctalia's desktop-widgets editor and add
+`calendar-desktop` (`notoxus/vietnamese-lunar-calendar:calendar-desktop`).
+Move and resize it freely. Text size follows the **Text Size** setting.

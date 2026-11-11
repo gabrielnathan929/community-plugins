@@ -1,32 +1,20 @@
 --!nonstrict
--- Drag a screen onto another to swap them, onto a slot to insert beside, above
--- or below, or into the tray to turn it off.
---
--- Noctalia's panel tree is flexbox with discrete drag targets, so this is not a
--- free canvas: the reachable arrangements are the edge-to-edge ones, which is
--- the set worth having anyway. No drop can leave an overlap or a hole, since
--- positions are a running sum recomputed from the row order every time.
-
 local displays = require("./outputs.luau")
 local controls = require("./controls.luau")
 
 local CANVAS_W = 830
 local CANVAS_H = 400
--- Drawn narrow, caught wide: hitSlop is drag-only reach that costs no layout,
--- and the nearest accepting zone wins, so anywhere over the left half of a
--- screen resolves to the slot on its left.
+-- Wide hit areas keep narrow slots reachable without consuming canvas space.
 local SLOT = 22
 local END_SLOT = 44
 local ROW_SLOT = 20
 local HIT = 90
--- Deliberately short: an above/below slot spans the whole canvas width, so any
--- reach it is given competes with the side slots along that entire edge.
+-- Limit vertical reach to avoid competing with side slots along the entire row.
 local ROW_HIT = 24
--- Mark thickness, independent of the hit area behind it.
 local LINE = 10
 local MARK = 6
 local END_MARK = 22
-local MARK_FILL = "surface_variant"
+local MARK_FILL = "surface_container"
 local MARK_RADIUS = 4
 local MIN_BOX_W = 96
 local MIN_BOX_H = 58
@@ -39,9 +27,7 @@ local statusIsError = false
 
 local render
 
-local function tr(key, subst)
-  return noctalia.tr(key, subst)
-end
+local tr = noctalia.tr
 
 -- ── Model ──────────────────────────────────────────────────────────────────
 
@@ -102,10 +88,8 @@ end
 
 -- ── View ───────────────────────────────────────────────────────────────────
 
--- The canvas is a fixed frame and the screens shrink to fit it, however many
--- there are. One factor serves both axes, so a 16:9 panel beside a 16:10 one
--- keeps the height difference that decides how the desktop lines up, and the
--- floors give way rather than push a row past the edge.
+-- Use one scale factor to preserve relative geometry; shrink minimum sizes
+-- when necessary to keep crowded rows within the canvas.
 local function metrics()
   local totalW, totalH, widest = 0, 0, 1
   for _, row in ipairs(rows) do
@@ -184,8 +168,7 @@ local function screen(output, m)
     radius = 8,
   }, children)
 
-  -- A screen is its own drop target: nested zones resolve to the deepest one,
-  -- and the dragSource inside is not a zone, so this catches the drop.
+  -- The nested drag source is not a drop zone, so its parent receives the drop.
   return ui.dropZone({
     key = "swap-" .. output.name,
     accepts = { "display" },
@@ -196,9 +179,7 @@ local function screen(output, m)
   }, { box })
 end
 
--- The outermost slots take `grow`, so the empty canvas around the arrangement
--- belongs to them: a drag thrown at the edge of the window still lands. The
--- pointer cannot be confined from a plugin, so the target is stretched instead.
+-- Grow outer slots so drops at the canvas edge still reach a target.
 local function slot(value, width, height, reach, grow, mark)
   local vertical = height > width
   local thickness = mark or MARK
@@ -215,8 +196,6 @@ local function slot(value, width, height, reach, grow, mark)
     height = height,
     radius = 4,
   }, {
-    -- A capsule in the panel's own grey, so a drop target looks like the rest
-    -- of the shell. Between two screens it is only a hint, so it stays thin.
     ui.box({
       width = vertical and thickness or math.max(width - 12, LINE),
       height = vertical and height or thickness,
@@ -257,12 +236,10 @@ local function canvas()
     flexGrow = 1,
     padding = 12,
     radius = controls.RADIUS,
-    fill = "surface_variant/0.35",
+    fill = "surface_container/0.35",
   }, nodes)
 end
 
--- An outlined empty box reads as somewhere to put something; the filled strip
--- with a caption beside it read as a status line nobody looks at.
 local function tray()
   local children = {}
   local list = offline()
@@ -272,8 +249,6 @@ local function tray()
     hint = tr("tray.restore")
     local chips = {}
     for _, output in ipairs(list) do
-      -- A grip and a capsule, so a parked display looks like something to pick
-      -- up rather than a line of status text.
       table.insert(chips, ui.dragSource({
         key = "off-" .. output.name,
         dragType = "display",
@@ -283,8 +258,8 @@ local function tray()
         align = "center",
         paddingH = 12,
         paddingV = 8,
-        fill = "surface_variant",
-        border = "outline",
+        fill = "surface_container",
+        border = "outline_variant",
         borderWidth = 1,
         radius = 10,
       }, {
@@ -317,7 +292,7 @@ local function tray()
     gap = 8,
     padding = 16,
     radius = controls.RADIUS,
-    border = "outline",
+    border = "outline_variant",
     borderWidth = 1,
   }, children)
 end
@@ -325,6 +300,7 @@ end
 render = function()
   local nodes = {
     controls.header(tr("arrange.title"), {
+      ui.button({ glyph = "arrow-left", variant = "ghost", controlSize = "sm", tooltip = tr("action.back"), onClick = "onBack" }),
       ui.label({ text = tr("arrange.hint"), fontSize = 11, color = "on_surface_variant" }),
       ui.button({ glyph = "refresh", variant = "ghost", controlSize = "sm", tooltip = tr("action.refresh"), onClick = "onRefresh" }),
       ui.button({ glyph = "x", variant = "ghost", controlSize = "sm", onClick = "onCloseClick" }),
@@ -409,11 +385,15 @@ function onDrop(payload, value)
   commit()
 end
 
+function onBack()
+  panel.close()
+  noctalia.togglePanel("prponkshe/umbriel-displays:panel")
+end
+
 -- Escape walks back to the panel this window was opened from, rather than
 -- leaving the user on the desktop.
 function onKey(chord, pressed)
   if pressed and chord == "escape" then
-    panel.close()
-    noctalia.togglePanel("prponkshe/umbriel-displays:panel")
+    onBack()
   end
 end

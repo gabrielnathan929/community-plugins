@@ -6,7 +6,11 @@ PRESETS_DIR="$PLUGIN_DIR/assets/borders"
 FRAGMENTS_DIR="$PLUGIN_DIR/assets/fragments"
 SCRIPTS_DIR="$PLUGIN_DIR/assets/scripts"
 CONVERTER="$SCRIPTS_DIR/conf2lua.py"
-COLORS_FILE="$HOME/.config/hypr/noctalia/noctalia-colors.lua"
+# Orden = de la fuente más viva a la más vieja: con config Lua, noctalia.lua es
+# lo que apply_theme() aplica de verdad; noctalia-colors.conf solo lo refresca
+# la plantilla hyprlang y puede quedarse con una paleta de hace semanas.
+COLORS_FILE=""
+for f in "$HOME/.config/hypr/noctalia.lua" "$HOME/.config/hypr/noctalia/noctalia-colors.lua" "$HOME/.config/hypr/noctalia/noctalia-colors.conf"; do [ -f "$f" ] && { COLORS_FILE="$f"; break; }; done
 
 mkdir -p "$FRAGMENTS_DIR"
 PRESET_NAME=$1
@@ -18,14 +22,20 @@ else
     if [ -f "$TARGET_FILE" ]; then
         # Extraer colores de noctalia-colors.lua para expandir $variables
         COLOR_ARGS=""
-        if [ -f "$COLORS_FILE" ]; then
-            while IFS= read -r line; do
-                name=$(echo "$line" | grep -oP 'local\s+\K\w+')
-                val=$(echo "$line" | grep -oP '"\K[^"]*')
-                if [ -n "$name" ] && [ -n "$val" ]; then
-                    COLOR_ARGS="$COLOR_ARGS --color $name=$val"
-                fi
-            done < <(grep -oP 'local\s+\w+\s*=\s*"[^"]*"' "$COLORS_FILE")
+        if [ -n "$COLORS_FILE" ] && [ -f "$COLORS_FILE" ]; then
+            if [[ "$COLORS_FILE" == *.lua ]]; then
+                while IFS= read -r line; do
+                    name=$(echo "$line" | grep -oP 'local\s+\K\w+')
+                    val=$(echo "$line" | grep -oP '"\K[^"]*')
+                    [ -n "$name" ] && [ -n "$val" ] && COLOR_ARGS="$COLOR_ARGS --color $name=$val"
+                done < <(grep -oP 'local\s+\w+\s*=\s*"[^"]*"' "$COLORS_FILE")
+            else
+                while IFS= read -r line; do
+                    name=$(echo "$line" | sed -n 's/^\$\([A-Za-z0-9_]*\).*/\1/p')
+                    val=$(echo "$line" | sed -n 's/^[^=]*=[[:space:]]*//p')
+                    [ -n "$name" ] && [ -n "$val" ] && COLOR_ARGS="$COLOR_ARGS --color $name=$val"
+                done < <(grep -E '^\$[A-Za-z0-9_]+[[:space:]]*=' "$COLORS_FILE")
+            fi
         fi
         
         python3 "$CONVERTER" "$TARGET_FILE" $COLOR_ARGS > "$FRAGMENTS_DIR/border.lua"

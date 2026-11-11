@@ -31,6 +31,8 @@
     "goto_list_tooltip": "Show in list",
     "load_more": "Load more",
     "loading": "Loading...",
+    "mpris_missing_body": "Install the mpv-mpris package so the station name and logo appear in Noctalia's media panel.",
+    "mpris_missing_title": "Media panel integration needs mpv-mpris",
     "next_tooltip": "Next station",
     "play_tooltip": "Play",
     "prev_tooltip": "Previous station",

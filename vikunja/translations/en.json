@@ -2,12 +2,15 @@
   "actions": {
     "complete": "Complete",
     "copy": "Copy title",
+    "hide_done": "Hide done",
     "move_to": "Move to",
     "open": "Open in Vikunja",
     "open_project": "Project tasks",
     "postpone_1": "+1 day",
     "postpone_3": "+3 days",
-    "refresh": "Refresh"
+    "refresh": "Refresh",
+    "reopen": "Reopen",
+    "show_done": "Show done"
   },
   "colors": {
     "error": "Error",
@@ -45,9 +48,12 @@
   },
   "result": {
     "added": "Added “{title}”",
+    "bucket_gone": "That bucket no longer exists — board reloaded, try again",
     "busy": "Another operation is running.",
     "completed": "Completed “{title}”",
     "copied": "Copied “{text}”",
+    "done_hidden": "Hiding done tasks",
+    "done_shown": "Showing done tasks",
     "failed": "Failed: {error}",
     "moved": "Moved “{title}” to {bucket}",
     "no_project": "No project to add to — set a default project in the plugin settings.",
@@ -56,7 +62,8 @@
     "overdue_notice": "{n} task(s) overdue: {titles}",
     "postponed": "Postponed “{title}” to {date}",
     "project_closed": "Back to projects",
-    "project_opened": "Opened “{project}”"
+    "project_opened": "Opened “{project}”",
+    "reopened": "Reopened “{title}”"
   },
   "settings": {
     "api_token": {

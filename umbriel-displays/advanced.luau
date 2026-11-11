@@ -1,11 +1,4 @@
 --!nonstrict
--- The rest of what an [output.*] section can say: rotation, sync policy, HDR,
--- workspace inventory and the scrolling default.
---
--- These are set once for a display and then forgotten, so they live behind
--- their own window rather than in the panel that opens on a click. Every value
--- is written to the same include file the main panel and the arrangement write.
-
 local displays = require("./outputs.luau")
 local controls = require("./controls.luau")
 
@@ -32,9 +25,7 @@ local toggleKey = 0
 
 local render
 
-local function tr(key, subst)
-  return noctalia.tr(key, subst)
-end
+local tr = noctalia.tr
 
 -- ── Model ──────────────────────────────────────────────────────────────────
 
@@ -72,9 +63,12 @@ local function value(output, key, fallback)
   return displays.text(output.section[key]) or fallback
 end
 
--- Writing one key still lays the arrangement out again, since a rotation
--- changes the logical box every display to the right of it sits against.
+-- Rotation changes the logical box, so adjacent displays must be repositioned.
 local function commit(output, changes)
+  local previousTransform = output.transform
+  if changes.transform ~= nil then
+    output.transform = displays.text(changes.transform)
+  end
   local sections = displays.apply(outputs, displays.rows(outputs))
   local section = displays.sectionFor(sections, output)
   for key, raw in pairs(changes) do
@@ -86,6 +80,7 @@ local function commit(output, changes)
     if ok then
       status, statusIsError = tr("status.applied"), false
     else
+      output.transform = previousTransform
       status, statusIsError = unsupported ~= nil and tr("status.unsupported", { key = unsupported })
         or tr("status.write_failed", { error = tostring(err) }), true
       toggleKey = toggleKey + 1
@@ -99,7 +94,7 @@ end
 
 local function enumControl(output, key, options, fallback)
   return controls.control(tr("field." .. key), controls.chips(options, value(output, key, fallback), function(picked)
-    commit(output, { [key] = displays.quoted(picked) })
+    commit(output, { [key] = string.format("%q", picked) })
   end))
 end
 
@@ -162,6 +157,7 @@ render = function()
   local output = selected()
   local nodes = {
     controls.header(tr("advanced.title"), {
+      ui.button({ glyph = "arrow-left", variant = "ghost", controlSize = "sm", tooltip = tr("action.back"), onClick = "onBack" }),
       ui.button({ glyph = "refresh", variant = "ghost", controlSize = "sm", tooltip = tr("action.refresh"), onClick = "onRefresh" }),
       ui.button({ glyph = "x", variant = "ghost", controlSize = "sm", onClick = "onCloseClick" }),
     }),
@@ -237,11 +233,15 @@ function onCloseClick()
   panel.close()
 end
 
+function onBack()
+  panel.close()
+  noctalia.togglePanel("prponkshe/umbriel-displays:panel")
+end
+
 -- Escape walks back to the panel this window was opened from, rather than
 -- leaving the user on the desktop.
 function onKey(chord, pressed)
   if pressed and chord == "escape" then
-    panel.close()
-    noctalia.togglePanel("prponkshe/umbriel-displays:panel")
+    onBack()
   end
 end

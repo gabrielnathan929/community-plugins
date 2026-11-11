@@ -117,6 +117,7 @@
       "label": "İsim etiketi"
     }
   },
+  "settings_tooltip": "Ayarlar",
   "show_controls_tooltip": "Sıralama/düzenleme/silme kontrollerini göster",
   "title": "Yer İmleri"
 }

@@ -12,6 +12,7 @@
     "no-variants": "No alternative lyrics found",
     "now-playing": "NOW PLAYING",
     "reload-lyrics": "Reload lyrics",
+    "seek-to": "Seek to",
     "synced": "synced",
     "unsynced": "unsynced",
     "variant-default": "Default"
@@ -37,6 +38,50 @@
       "description": "Show \"Artist - Title\" instead of \"Title - Artist\".",
       "label": "Artist first"
     },
+    "audio_spectrum": {
+      "description": "Draw a live audio band meter in the chip.",
+      "label": "Audio spectrum"
+    },
+    "audio_spectrum_bands": {
+      "description": "Number of spectrum bands, 1-64.",
+      "label": "Spectrum bands"
+    },
+    "desktop_active_color": {
+      "description": "Color of the current lyric line and the karaoke word highlight.",
+      "label": "Active line color"
+    },
+    "desktop_color": {
+      "description": "Color of the regular lyric lines.",
+      "label": "Text color"
+    },
+    "desktop_font_size": {
+      "description": "Font size of the lyric lines, 8-96.",
+      "label": "Lyrics font size"
+    },
+    "desktop_lines": {
+      "description": "Minimum lyric lines in the desktop widget; short tracks fill more.",
+      "label": "Lyric lines"
+    },
+    "desktop_shadow": {
+      "description": "Drop shadow behind the lyric text; helps on a busy wallpaper.",
+      "label": "Text shadow"
+    },
+    "desktop_show_artist": {
+      "description": "Show the artist line under the title on the desktop widget.",
+      "label": "Show artist"
+    },
+    "desktop_show_cover": {
+      "description": "Show the album artwork on the desktop widget.",
+      "label": "Show album art"
+    },
+    "desktop_width": {
+      "description": "Content width in logical pixels. Keep the editor box on auto (0) so the surface hugs the content.",
+      "label": "Widget width"
+    },
+    "desktop_word_sweep": {
+      "description": "Sweep the highlight word by word through the current line. Off: the whole line is highlighted at once (line by line).",
+      "label": "Word-by-word highlight"
+    },
     "hide_album_art": {
       "description": "Hide the artwork and its fallback icon.",
       "label": "Hide album art"
@@ -44,6 +89,10 @@
     "hide_artist": {
       "description": "Show only the track title.",
       "label": "Hide artist"
+    },
+    "hide_when_idle": {
+      "description": "Hide the widget while playback is paused.",
+      "label": "Hide when paused"
     },
     "hide_when_no_media": {
       "description": "Hide the widget when no MPRIS player is active.",
@@ -62,7 +111,7 @@
       "label": "Min length"
     },
     "offset_ms": {
-      "description": "Shift lyric timing: positive values show lines earlier, negative later.",
+      "description": "Shift lyric timing in milliseconds (range -2000 to 2000). Positive values show lines earlier, negative values later.",
       "label": "Lyrics offset (ms)"
     },
     "panel_size": {
@@ -95,6 +144,10 @@
         "none": "None",
         "on_hover": "On hover"
       }
+    },
+    "source_order": {
+      "description": "Which online lyric provider to ask first. Comma separated, e.g. \"netease, lrclib\". A provider left out keeps its default place at the end.",
+      "label": "Lyrics source order"
     },
     "use_cache": {
       "description": "Store fetched lyrics in the plugin data directory for offline reuse.",

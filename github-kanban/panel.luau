@@ -8,6 +8,7 @@ local issueScopeFilter = noctalia.getConfig("issue_default_filter") or "all"
 local feedFilter = "all"
 local notificationFilter = "all"
 local notificationReadFilter = noctalia.getConfig("notification_default_filter") or "unread"
+local notificationPage = 1
 local hovered = nil
 local followingVisibleByGroup = {}
 local selectedDate = nil
@@ -27,21 +28,36 @@ local CELL_SIZE = 13
 local CELL_GAP = 1
 local CELL_RADIUS = 2
 local COLORS = {
-  "surface_variant",
+  "surface_container",
   "primary/0.25",
   "primary/0.45",
   "primary/0.70",
   "primary",
 }
 
+local CONFIG_NIL = {}
+local renderConfigCache = nil
+
+local function readConfig(key)
+  if renderConfigCache == nil then return noctalia.getConfig(key) end
+  local value = renderConfigCache[key]
+  if value ~= nil then
+    if value == CONFIG_NIL then return nil end
+    return value
+  end
+  value = noctalia.getConfig(key)
+  renderConfigCache[key] = value == nil and CONFIG_NIL or value
+  return value
+end
+
 local function cfg(key, fallback)
-  local value = noctalia.getConfig(key)
+  local value = readConfig(key)
   if value == nil or value == "" then return fallback end
   return value
 end
 
 local function cfgInt(key, fallback, minimum, maximum)
-  return math.clamp(tonumber(noctalia.getConfig(key)) or fallback, minimum, maximum)
+  return math.clamp(tonumber(readConfig(key)) or fallback, minimum, maximum)
 end
 
 local function font(size)
@@ -61,17 +77,17 @@ local function cardFill()
   local mode = cfg("appearance_card_background", "tinted")
   if mode == "transparent" then return "transparent" end
   if mode == "solid" then return "surface/0.68" end
-  return "surface_variant/0.38"
+  return "surface_container/0.38"
 end
 
 local function cardBorder(active, unread)
   local mode = cfg("appearance_card_border", "subtle")
   local hover = cfg("appearance_hover_effect", "background")
-  if unread and noctalia.getConfig("notification_unread_border") ~= false then return "primary", 2 end
+  if unread and readConfig("notification_unread_border") ~= false then return "primary", 2 end
   if active and hover == "border" then return "primary", 2 end
-  if mode == "none" then return "outline/0", 0 end
+  if mode == "none" then return "outline_variant/0", 0 end
   if mode == "accent" then return "primary", 1 end
-  return "outline", 1
+  return "outline_variant", 1
 end
 
 local function hoverFill(active, unread)
@@ -108,12 +124,12 @@ local function loadHeatmapAppearance()
   local maxCell = math.floor((760 - 52 * CELL_GAP) / 53)
   CELL_SIZE = math.clamp(math.min(CELL_SIZE, maxCell), 8, 16)
   local mode = cfg("heatmap_color_mode", "noctalia")
-  local themed = { "surface_variant", "primary/0.25", "primary/0.45", "primary/0.70", "primary" }
+  local themed = { "surface_container", "primary/0.25", "primary/0.45", "primary/0.70", "primary" }
   if mode == "github" then
     COLORS = { "#ebedf0", "#9be9a8", "#40c463", "#30a14e", "#216e39" }
   elseif mode == "custom" then
     COLORS = {}
-    for level = 0, 4 do COLORS[level + 1] = validHex(noctalia.getConfig("heatmap_custom_level_" .. tostring(level))) or themed[level + 1] end
+    for level = 0, 4 do COLORS[level + 1] = validHex(readConfig("heatmap_custom_level_" .. tostring(level))) or themed[level + 1] end
   else COLORS = themed end
 end
 
@@ -174,6 +190,10 @@ local state = {
   profile = noctalia.state.get("profile") or {},
   contributions = noctalia.state.get("contributions") or {},
   notifications = noctalia.state.get("notifications") or {},
+  notificationsStatus = noctalia.state.get("notifications_status") or "loading",
+  notificationsLastUpdate = noctalia.state.get("notifications_last_update") or "",
+  notificationsError = noctalia.state.get("notifications_error") or "",
+  notificationsPending = noctalia.state.get("notifications_pending") or {},
   followingEvents = noctalia.state.get("following_events") or {},
   followingRepoEvents = noctalia.state.get("following_repo_events") or {},
   prs = noctalia.state.get("my_prs") or {},
@@ -326,10 +346,10 @@ local function prepareGrid()
     return
   end
   local calendarRows = {}
-  if noctalia.getConfig("heatmap_show_months") ~= false then calendarRows[#calendarRows + 1] = monthHeader() end
+  if readConfig("heatmap_show_months") ~= false then calendarRows[#calendarRows + 1] = monthHeader() end
   calendarRows[#calendarRows + 1] = ui.row({ gap = CELL_GAP, align = "start" }, gridColumns)
   local calendar = { ui.column({ gap = 5, align = "start" }, calendarRows) }
-  if noctalia.getConfig("heatmap_show_weekdays") ~= false then table.insert(calendar, 1, weekdayLabels()) end
+  if readConfig("heatmap_show_weekdays") ~= false then table.insert(calendar, 1, weekdayLabels()) end
   cachedCalendar = ui.row({ gap = 10, align = "end", justify = "center" }, calendar)
   panel.setWantsSecondTicks(false)
   panel.setNeedsFrameTick(false)
@@ -345,7 +365,21 @@ local function openLink(url)
     noctalia.notifyError(tr("panel.title"), tr("status.missing_xdg_open"))
     return
   end
-  noctalia.runAsync({ "xdg-open", url })
+  return noctalia.runAsync({ "xdg-open", url })
+end
+
+local function notificationSynced()
+  return readConfig("notification_sync_mode") == "synced"
+end
+
+local function notificationAction(action)
+  action.nonce = noctalia.nowMs()
+  noctalia.state.set("notification_action", action)
+end
+
+local function markNotificationRead(item)
+  if not notificationSynced() or item.unread ~= true or state.notificationsPending[tostring(item.id)] then return end
+  notificationAction({ type = "mark_read", id = item.id, updatedAt = item.updatedAt })
 end
 
 local function button(text, selected, callback)
@@ -402,43 +436,68 @@ local function card(item, glyph, context)
       })
     end
   else
-    leading = ui.glyph({ name = glyph or item.glyph or "brand-github", size = font(20), color = iconColor(active), visible = context ~= "activity" or noctalia.getConfig("activity_show_type_icons") ~= false })
+    leading = ui.glyph({ name = glyph or item.glyph or "brand-github", size = font(20), color = iconColor(active), visible = context ~= "activity" or readConfig("activity_show_type_icons") ~= false })
   end
   local displayTitle = item.source == "user" and item.actor and item.actor ~= ""
     and (item.actor .. "  ·  " .. title) or title
-  if context == "activity" and noctalia.getConfig("activity_repository_emphasis") ~= false and item.repository and item.repository ~= "" then
+  if context == "activity" and readConfig("activity_repository_emphasis") ~= false and item.repository and item.repository ~= "" then
     displayTitle = item.repository .. " · " .. displayTitle
   end
   local border, borderWidth = cardBorder(active, unread)
   local secondaryMode = cfg("appearance_secondary_text", "truncate")
   local secondaryLines = secondaryMode == "full" and 4 or 1
   local readOpacity = unread and 1 or cfgInt("notification_read_opacity", 100, 40, 100) / 100
-  return ui.row({
-    key = key, gap = densityValue(7, 10, 13), padding = densityValue(7, 10, 13), radius = cardRadius(),
-    border = border, borderWidth = borderWidth, fill = hoverFill(active, unread), opacity = context == "notifications" and readOpacity or 1,
+  local pending = state.notificationsPending[tostring(item.id)] == true
+  local inlineReadAction = context == "notifications" and notificationSynced() and (unread or pending)
+  local function onCardHover(value)
+    if readConfig("appearance_animations") == false then return end
+    hovered = value == "true" and key or nil
+    render()
+  end
+  local content = ui.row({
+    key = key, flexGrow = 1, gap = densityValue(7, 10, 13),
+    padding = inlineReadAction and 0 or densityValue(7, 10, 13), radius = inlineReadAction and 0 or cardRadius(),
+    border = inlineReadAction and "outline_variant/0" or border, borderWidth = inlineReadAction and 0 or borderWidth,
+    fill = inlineReadAction and "transparent" or hoverFill(active, unread),
+    opacity = inlineReadAction and 1 or (context == "notifications" and readOpacity or 1),
     align = "center",
-    onClick = function() openLink(url) end,
-    onHover = function(value)
-      if noctalia.getConfig("appearance_animations") == false then return end
-      hovered = value == "true" and key or nil
-      render()
+    onClick = function()
+      if openLink(url) and context == "notifications" and notificationSynced()
+        and readConfig("notification_mark_read_on_open") == true then
+        markNotificationRead(item)
+      end
     end,
+    onHover = not inlineReadAction and onCardHover or nil,
   }, {
-    ui.box({ width = 7, height = 7, radius = 4, fill = "primary", visible = unread and noctalia.getConfig("notification_unread_dot") ~= false }),
+    ui.box({ width = 7, height = 7, radius = 4, fill = "primary", visible = unread and readConfig("notification_unread_dot") ~= false }),
     leading,
     ui.column({ flexGrow = 1, gap = 3 }, {
       ui.label({ text = displayTitle, fontWeight = "bold", fontSize = font(13), color = active and cfg("appearance_hover_effect", "background") == "background" and "on_tertiary" or "on_surface", maxLines = 2 }),
       ui.label({ text = subtitle, fontSize = font(11), color = active and cfg("appearance_hover_effect", "background") == "background" and "on_tertiary" or "on_surface_variant", maxLines = secondaryLines, visible = subtitle ~= "" and secondaryMode ~= "hidden" }),
     }),
-    ui.label({ text = meta, fontSize = font(10), color = active and cfg("appearance_hover_effect", "background") == "background" and "on_tertiary" or "on_surface_variant", maxLines = 1, visible = meta ~= "" and (context ~= "activity" or noctalia.getConfig("activity_show_status_badges") ~= false) }),
+    ui.label({ text = meta, fontSize = font(10), color = active and cfg("appearance_hover_effect", "background") == "background" and "on_tertiary" or "on_surface_variant", maxLines = 1, visible = meta ~= "" and (context ~= "activity" or readConfig("activity_show_status_badges") ~= false) }),
     ui.glyph({ name = "external-link", size = 15, color = active and "on_tertiary" or "on_surface_variant", visible = url ~= "" }),
+  })
+  if not inlineReadAction then return content end
+  -- The card owns its border; link content and read action are sibling hit targets.
+  return ui.row({
+    key = "notification-row-" .. key, gap = 6, align = "center",
+    padding = densityValue(7, 10, 13), radius = cardRadius(),
+    border = border, borderWidth = borderWidth, fill = hoverFill(active, unread), opacity = readOpacity,
+    onHover = onCardHover,
+  }, {
+    content,
+    ui.button({ key = "notification-read-" .. key, glyph = pending and "clock" or "check",
+      tooltip = tr(pending and "action.marking_read" or "action.mark_read"),
+      variant = "ghost", controlSize = "sm", enabled = not pending,
+      onClick = function() markNotificationRead(item) end }),
   })
 end
 
 local function listView(items, glyph, context)
   if type(items) ~= "table" or #items == 0 then
     return ui.column({ flexGrow = 1, align = "center", justify = "center", gap = 10 }, {
-      ui.glyph({ name = "inbox", size = font(38), color = "on_surface_variant", visible = noctalia.getConfig("appearance_show_empty_illustration") ~= false }),
+      ui.glyph({ name = "inbox", size = font(38), color = "on_surface_variant", visible = readConfig("appearance_show_empty_illustration") ~= false }),
       ui.label({ text = tr("status.empty"), color = "on_surface_variant" }),
     })
   end
@@ -452,8 +511,8 @@ local function repositoryCard(item)
   local active = hovered == key
   local border, borderWidth = cardBorder(active, false)
   local details = {}
-  if noctalia.getConfig("repositories_show_language") ~= false and item.language and item.language ~= "" then details[#details + 1] = item.language end
-  if noctalia.getConfig("repositories_show_stats") ~= false then
+  if readConfig("repositories_show_language") ~= false and item.language and item.language ~= "" then details[#details + 1] = item.language end
+  if readConfig("repositories_show_stats") ~= false then
     details[#details + 1] = tr("repository.stars", { count = item.stars or 0 })
     details[#details + 1] = tr("repository.forks", { count = item.forks or 0 })
   end
@@ -463,7 +522,7 @@ local function repositoryCard(item)
     fill = hoverFill(active, false), border = border, borderWidth = borderWidth,
     onClick = function() openLink(item.url) end,
     onHover = function(value)
-      if noctalia.getConfig("appearance_animations") == false then return end
+      if readConfig("appearance_animations") == false then return end
       hovered = value == "true" and key or nil
       render()
     end,
@@ -512,7 +571,7 @@ local function followingEventRow(item)
     align = "center",
     onClick = function() openLink(url) end,
     onHover = function(value)
-      if noctalia.getConfig("appearance_animations") == false then return end
+      if readConfig("appearance_animations") == false then return end
       hovered = value == "true" and key or nil
       render()
     end,
@@ -539,7 +598,7 @@ local function followingGroupCard(group)
       ui.glyph({ name = isUser and "user" or "folder-code", size = font(17), color = iconColor(false) }),
     })
   end
-  local maxHeight = math.clamp(tonumber(noctalia.getConfig("following_card_max_height")) or 260, 140, 500)
+  local maxHeight = math.clamp(tonumber(readConfig("following_card_max_height")) or 260, 140, 500)
   local rowHeight = densityValue(50, 58, 68) + (cfgInt("following_content_lines", 2, 1, 5) - 2) * font(9)
   local headerHeight = densityValue(52, 59, 68)
   local hasOverflow = headerHeight + #group.items * rowHeight > maxHeight
@@ -565,7 +624,7 @@ local function followingGroupCard(group)
   return ui.column({
     key = "following-group-" .. group.key,
     gap = densityValue(5, 7, 10), padding = densityValue(7, 10, 13), radius = cardRadius(),
-    border = cfg("appearance_card_border", "subtle") == "none" and "outline/0" or (cfg("appearance_card_border", "subtle") == "accent" and "primary" or "outline"),
+    border = cfg("appearance_card_border", "subtle") == "none" and "outline_variant/0" or (cfg("appearance_card_border", "subtle") == "accent" and "primary" or "outline_variant"),
     borderWidth = cfg("appearance_card_border", "subtle") == "none" and 0 or 1,
     fill = cardFill(),
   }, {
@@ -660,7 +719,7 @@ end
 local function heatmapPlaceholderHeight()
   -- Estimate the real card height so the placeholder swap doesn't jump layout.
   local gridH = 7 * CELL_SIZE + 6 * CELL_GAP
-  local monthsH = noctalia.getConfig("heatmap_show_months") ~= false and 19 or 0
+  local monthsH = readConfig("heatmap_show_months") ~= false and 19 or 0
   return gridH + monthsH + 18 + densityValue(9, 12, 15) * 2 + cardSpacing()
 end
 
@@ -688,15 +747,15 @@ local function heatmap()
   legend[#legend + 1] = ui.label({ text = tr("heatmap.more"), fontSize = font(9), color = "on_surface_variant" })
   local footer = {}
   -- Keyed on content so hover selections re-resolve width with flexGrow applied.
-  if noctalia.getConfig("heatmap_show_total") ~= false then footer[#footer + 1] = ui.label({ key = "heatmap-footer-" .. (selectedDate or "total"), text = detail, flexGrow = 1, fontSize = font(10), color = "on_surface_variant", maxLines = 1 })
+  if readConfig("heatmap_show_total") ~= false then footer[#footer + 1] = ui.label({ key = "heatmap-footer-" .. (selectedDate or "total"), text = detail, flexGrow = 1, fontSize = font(10), color = "on_surface_variant", maxLines = 1 })
   else footer[#footer + 1] = ui.box({ flexGrow = 1 }) end
-  if noctalia.getConfig("heatmap_show_legend") ~= false then footer[#footer + 1] = ui.row({ gap = 3, align = "center" }, legend) end
+  if readConfig("heatmap_show_legend") ~= false then footer[#footer + 1] = ui.row({ gap = 3, align = "center" }, legend) end
   -- Footer inset to the grid width (weeks * (CELL + GAP) - GAP), mirroring the
   -- calendar row's weekday gutter so items align with the grid edges.
   local gridWidth = math.max(gridWeekCount * (CELL_SIZE + CELL_GAP) - CELL_GAP, CELL_SIZE)
   local footerRow = ui.row({ width = gridWidth, align = "center", gap = 6 }, footer)
   local footerZone
-  if noctalia.getConfig("heatmap_show_weekdays") ~= false then
+  if readConfig("heatmap_show_weekdays") ~= false then
     footerZone = ui.row({ gap = 10, align = "center", justify = "center" }, {
       ui.box({ width = 28 }),
       footerRow,
@@ -707,7 +766,7 @@ local function heatmap()
   return ui.column({
     flexGrow = 1, justify = "center",
     gap = cardSpacing(), padding = densityValue(9, 12, 15), radius = cardRadius(),
-    fill = "surface/0.20", border = "outline/0.45", borderWidth = 1,
+    fill = "surface/0.20", border = "outline_variant/0.45", borderWidth = 1,
   }, {
     cachedCalendar,
     footerZone,
@@ -738,6 +797,8 @@ local function notificationGroup(reason)
   return "updates"
 end
 
+local NOTIFICATION_PAGE_SIZE = 50
+
 local function notifications()
   local readFilters = {
     { id = "all", label = tr("filter.all") }, { id = "unread", label = tr("filter.unread") }, { id = "read", label = tr("filter.read") },
@@ -749,11 +810,15 @@ local function notifications()
   local readStrip, reasonStrip = {}, {}
   for _, filter in ipairs(readFilters) do
     local id = filter.id
-    readStrip[#readStrip + 1] = button(filter.label, notificationReadFilter == id, function() notificationReadFilter = id; render() end)
+    local filterButton = button(filter.label, notificationReadFilter == id, function() notificationReadFilter = id; notificationPage = 1; render() end)
+    filterButton.props.key = "notification-read-filter-" .. id
+    readStrip[#readStrip + 1] = filterButton
   end
   for _, filter in ipairs(reasonFilters) do
     local id = filter.id
-    reasonStrip[#reasonStrip + 1] = button(filter.label, notificationFilter == id, function() notificationFilter = id; render() end)
+    local filterButton = button(filter.label, notificationFilter == id, function() notificationFilter = id; notificationPage = 1; render() end)
+    filterButton.props.key = "notification-reason-filter-" .. id
+    reasonStrip[#reasonStrip + 1] = filterButton
   end
   local items = {}
   for _, item in ipairs(state.notifications) do
@@ -763,11 +828,51 @@ local function notifications()
     local reasonMatches = notificationFilter == "all" or notificationGroup(item.reason) == notificationFilter
     if readMatches and reasonMatches then items[#items + 1] = item end
   end
-  return ui.column({ flexGrow = 1, gap = 8 }, {
-    ui.row({ gap = 4 }, readStrip),
-    ui.row({ gap = 4 }, reasonStrip),
-    listView(items, "bell", "notifications"),
-  })
+  local pageCount = math.max(1, math.ceil(#items / NOTIFICATION_PAGE_SIZE))
+  notificationPage = math.clamp(notificationPage, 1, pageCount)
+  local firstItem = (notificationPage - 1) * NOTIFICATION_PAGE_SIZE + 1
+  local pageItems = {}
+  for index = firstItem, math.min(#items, firstItem + NOTIFICATION_PAGE_SIZE - 1) do
+    pageItems[#pageItems + 1] = items[index]
+  end
+  local children = { ui.row({ gap = 4 }, readStrip), ui.row({ gap = 4 }, reasonStrip) }
+  if notificationSynced() then
+    local visibleUnread = {}
+    for _, item in ipairs(items) do
+      if item.unread == true and not state.notificationsPending[tostring(item.id)] then
+        visibleUnread[#visibleUnread + 1] = { id = item.id, updatedAt = item.updatedAt }
+      end
+    end
+    children[#children + 1] = ui.row({ gap = 6, align = "center" }, {
+      ui.button({ text = tr("action.mark_visible_read"), glyph = "check", variant = "primary", controlSize = "sm", enabled = #visibleUnread > 0,
+        onClick = function() notificationAction({ type = "mark_visible_read", items = visibleUnread }) end }),
+      ui.label({ text = tr("status.notifications_refreshing"), fontSize = font(11), color = "on_surface_variant", visible = state.notificationsStatus == "loading" }),
+      ui.label({ text = tr("action.marking_read"), fontSize = font(11), color = "on_surface_variant", visible = next(state.notificationsPending) ~= nil }),
+    })
+  end
+  local error = state.notificationsError
+  if error == "" then
+    if state.notificationsStatus == "missing_gh" then error = tr("status.missing_gh")
+    elseif state.notificationsStatus == "auth_error" then error = tr("status.auth_error") end
+  end
+  if error ~= "" then
+    children[#children + 1] = ui.label({ text = error, color = "on_surface_variant", fontSize = font(11), maxLines = 3 })
+  end
+  children[#children + 1] = listView(pageItems, "bell", "notifications")
+  if #items > NOTIFICATION_PAGE_SIZE then
+    children[#children + 1] = ui.row({ gap = 6, align = "center", justify = "center" }, {
+      ui.button({ key = "notifications-page-prev", glyph = "chevron-left", variant = "ghost", controlSize = "sm", enabled = notificationPage > 1,
+        onClick = function()
+          if notificationPage > 1 then notificationPage -= 1; render() end
+        end }),
+      ui.label({ key = "notifications-page-label", text = tostring(notificationPage) .. " / " .. tostring(pageCount), fontSize = font(11), color = "on_surface_variant" }),
+      ui.button({ key = "notifications-page-next", glyph = "chevron-right", variant = "ghost", controlSize = "sm", enabled = notificationPage < pageCount,
+        onClick = function()
+          if notificationPage < pageCount then notificationPage += 1; render() end
+        end }),
+    })
+  end
+  return ui.column({ flexGrow = 1, gap = 8 }, children)
 end
 
 local function work()
@@ -917,12 +1022,13 @@ local TABS = {
 local function enabledTabs()
   local tabs = {}
   for _, tab in ipairs(TABS) do
-    if noctalia.getConfig(tab.setting) ~= false then tabs[#tabs + 1] = tab end
+    if readConfig(tab.setting) ~= false then tabs[#tabs + 1] = tab end
   end
   return tabs
 end
 
 local function body()
+  if currentTab == "notifications" and notificationSynced() then return notifications() end
   if state.status == "loading" and next(state.profile) == nil then return statusView() end
   if (state.status == "missing_gh" or state.status == "auth_error") and not state.stale then return statusView() end
   if currentTab == "overview" then return overview() end
@@ -933,6 +1039,9 @@ local function body()
 end
 
 render = function()
+  local previousRenderConfigCache = renderConfigCache
+  renderConfigCache = {}
+  local ok, err = pcall(function()
   local tabs = {}
   local visibleTabs = enabledTabs()
   local currentVisible = false
@@ -946,12 +1055,13 @@ render = function()
       onClick = function() currentTab = id; hovered = nil; render() end,
     })
   end
-  local freshness = state.lastUpdate
+  local independentNotifications = currentTab == "notifications" and notificationSynced()
+  local freshness = independentNotifications and state.notificationsLastUpdate or state.lastUpdate
   if type(freshness) == "number" then freshness = noctalia.formatTime("%H:%M", freshness) end
-  if state.stale then freshness = tr("status.stale") end
+  if state.stale and not independentNotifications then freshness = tr("status.stale") end
   local content = #visibleTabs > 0 and body() or listView({}, "inbox")
   local contentChildren = {}
-  if state.status == "partial" or state.status == "auth_error" then
+  if not independentNotifications and (state.status == "partial" or state.status == "auth_error") then
     contentChildren[#contentChildren + 1] = ui.row({ gap = 7, align = "center", padding = 8, radius = cardRadius(), fill = "primary/0.12" }, {
       ui.glyph({ name = "alert-triangle", size = font(15), color = "primary" }),
       ui.label({ text = state.error ~= "" and state.error or tr("status.request_error"), color = "on_surface_variant", fontSize = font(11), maxLines = 2, flexGrow = 1 }),
@@ -963,17 +1073,27 @@ render = function()
       ui.glyph({ name = "brand-github", size = 25, color = "primary" }),
       ui.label({ text = tr("panel.title"), fontSize = font(19), fontWeight = "bold", flexGrow = 1 }),
       ui.label({ text = freshness, fontSize = font(10), color = "on_surface_variant" }),
-      ui.button({ glyph = "refresh", variant = "ghost", tooltip = tr("action.refresh"), onClick = function() noctalia.state.set("refresh_request", noctalia.nowMs()) end }),
+      ui.button({ glyph = "refresh", variant = "ghost", tooltip = tr("action.refresh"), onClick = function()
+        if independentNotifications then notificationAction({ type = "refresh" })
+        else noctalia.state.set("refresh_request", noctalia.nowMs()) end
+      end }),
       ui.button({ glyph = "close", variant = "ghost", tooltip = tr("action.close"), onClick = function() panel.close() end }),
     }),
     ui.row({ gap = 3, align = "center" }, tabs),
     ui.column({ flexGrow = 1, gap = 8 }, contentChildren),
   }))
+  end)
+  renderConfigCache = previousRenderConfigCache
+  if not ok then error(err) end
 end
 
 local lastRenderMs = 0
 local renderPending = false
 local function requestRender()
+  if not panelOpen then
+    renderPending = false
+    return
+  end
   -- Space data-driven renders so measurement sees settled trees.
   local now = noctalia.nowMs()
   if now - lastRenderMs < 400 then
@@ -989,14 +1109,15 @@ end
 local WATCHES = {
   status = "status", error = "error", stale = "stale", lastUpdate = "last_update",
   profile = "profile", contributions = "contributions", notifications = "notifications",
+  notificationsLastUpdate = "notifications_last_update", notificationsStatus = "notifications_status", notificationsError = "notifications_error", notificationsPending = "notifications_pending",
   followingEvents = "following_events", followingRepoEvents = "following_repo_events", prs = "my_prs",
   reviews = "review_prs", authoredIssues = "authored_issues", issues = "issues", repositories = "repositories", actions = "actions",
 }
 for field, key in pairs(WATCHES) do
   noctalia.state.watch(key, function(value)
     if field == "stale" then state[field] = value == true
-    elseif field == "status" then state[field] = value or "loading"
-    elseif field == "lastUpdate" or field == "error" then state[field] = value or ""
+    elseif field == "status" or field == "notificationsStatus" then state[field] = value or "loading"
+    elseif field == "lastUpdate" or field == "notificationsLastUpdate" or field == "error" or field == "notificationsError" then state[field] = value or ""
     else state[field] = value or {} end
     if field == "contributions" then
       resetGrid(state.contributions)
@@ -1020,9 +1141,15 @@ end
 
 function onOpen()
   panelOpen = true
+  renderPending = false
   followingVisibleByGroup = {}
+  notificationPage = 1
   panel.setWantsSecondTicks(true)
+  if notificationSynced() and readConfig("notification_refresh_on_open") ~= false then
+    notificationAction({ type = "refresh" })
+  end
   if gridReady and not cachedCalendar then
+    panel.setWantsSecondTicks(true)
     panel.setNeedsFrameTick(true)
   end
   render()
@@ -1030,26 +1157,29 @@ end
 
 function onClose()
   panelOpen = false
+  renderPending = false
+  panel.setWantsSecondTicks(false)
+  panel.setNeedsFrameTick(false)
 end
 
 function onFrameTick(_deltaMs)
-  prepareGrid()
+  if panelOpen then prepareGrid() end
 end
 
 function update()
-  if renderPending then
+  if panelOpen and renderPending then
     renderPending = false
     lastRenderMs = noctalia.nowMs()
     render()
   end
-  prepareGrid()
+  if panelOpen then prepareGrid() end
 end
 
 function onConfigChanged()
-  currentTab = noctalia.getConfig("default_dashboard") or "overview"
-  notificationReadFilter = noctalia.getConfig("notification_default_filter") or "unread"
-  prScopeFilter = noctalia.getConfig("pr_default_filter") or "all"
-  issueScopeFilter = noctalia.getConfig("issue_default_filter") or "all"
+  currentTab = readConfig("default_dashboard") or "overview"
+  notificationReadFilter = readConfig("notification_default_filter") or "unread"
+  prScopeFilter = readConfig("pr_default_filter") or "all"
+  issueScopeFilter = readConfig("issue_default_filter") or "all"
   loadHeatmapAppearance()
   resetGrid(state.contributions)
   if panelOpen and gridReady then
@@ -1057,7 +1187,10 @@ function onConfigChanged()
     panel.setNeedsFrameTick(true)
   end
   hovered = nil
-  render()
+  if panelOpen then
+    renderPending = false
+    render()
+  end
 end
 
 render()

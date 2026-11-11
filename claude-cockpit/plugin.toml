@@ -1,36 +1,48 @@
 # Claude Cockpit — Claude Code usage and session manager on the bar.
 #
-# One panel, three tabs: Usage (rate-limit windows, token/cost consumption,
+# One panel, five tabs: Live (running sessions by attention state, model,
+# context, cost; click to focus the terminal), Usage (rate-limit windows, token/cost consumption,
 # daily activity — get-claude-usage, copied from jrohland/claudecode, MIT,
 # does the actual data collection), Sessions
-# (every local Claude Code session, grouped by project, click to resume in a
-# terminal, delete with an inline confirm, expand for a cheap preview) and
-# CLAUDE.md (global + per-project files, opened in an external editor).
+# (every local Claude Code session, grouped by project, sorted by date or
+# name, keyboard navigation, empty ones filtered and cleaned up, running ones
+# marked; click to resume in a terminal, delete with an inline confirm,
+# expand for a cheap preview) and
+# CLAUDE.md (global + per-project files, opened in an external editor) and
+# Skills/Mods (installed Claude Code plugins and local skills, managed
+# through `claude plugin`).
 #
-# The bar glyph is deliberately minimal (no rate-limit pill/ring): that
-# would need porting jrohland/claudecode's ring.luau, which needs
-# noctalia.getSetting (plugin_api 26) for a number the Usage tab already
-# shows one click away.
+# The bar widget has two modes: activity (default — one dot per live
+# session + session/weekly fill rings with their percentages) and classic
+# (glyph + usage percentages).
 
 id = "nightwatch75/claude-cockpit"
 name = "Claude Cockpit"
-version = "0.6.5"
-# 24 for direct argv process execution: session delete (rm -rf on two fixed
-# paths) and opening a CLAUDE.md in an editor both exec directly, with no
-# shell parsing the path. 22 for the relative luau imports (shared.luau,
+version = "1.3.0"
+# 33 for `revealKey` on ui.scroll: the Sessions tab follows the keyboard
+# selection. 31 for noctalia.getColor: the bar widget's activity-mode rings
+# are SVGs that need the theme's real hex colors.
+# 24 for direct argv process execution: session delete/rename/repair, orphan
+# cleanup and opening a CLAUDE.md in an editor all exec directly, with no
+# shell parsing the path. 43 for the container color roles (surface_container). 22 for the relative luau imports (shared.luau,
 # sessions.luau).
-plugin_api = 24
+plugin_api = 43
 author = "nightwatch75"
 license = "MIT"
 # jq/curl/bash/find/stat/tail/head/grep/tac/awk are what get-claude-usage,
 # list-claude-sessions and find-claude-md (the CLAUDE.md tab's $HOME scan)
 # actually shell out to; rm powers session delete. Every one of them ships
 # with coreutils/findutils/gawk/grep/bash on every distro except jq and
-# curl, which get-claude-usage's own commandExists gate covers.
-dependencies = ["bash", "jq", "curl", "find", "stat", "tail", "head", "grep", "tac", "awk", "rm"]
+# curl, which get-claude-usage's own commandExists gate covers. claude runs
+# the Skills/Mods tab (`claude plugin ...`), gated the same way; xdg-open
+# opens a plugin's or skill's repository from that tab. mkdir/mv keep
+# live-claude-sessions' transcript-stats cache. niri/hyprctl/umbriel (focusing a
+# session's terminal) are optional and checked at run time, so they are not
+# listed here.
+dependencies = ["bash", "jq", "curl", "sh", "find", "xargs", "stat", "du", "tail", "head", "grep", "tac", "awk", "rm", "rmdir", "mkdir", "mv", "cut", "claude", "xdg-open"]
 tags = ["ai", "development", "bar", "panel", "service", "productivity"]
 icon = "robot"
-description = "Monitor Claude Code usage, browse and manage local sessions, edit CLAUDE.md files."
+description = "Live Claude Code sessions and usage on the bar; manage sessions, skills and mods, edit CLAUDE.md files."
 
 # Plugin-level settings, shared by the service (usage_refresh_interval) and
 # the panel (terminal for resume, editor_command for CLAUDE.md).
@@ -96,8 +108,12 @@ entry = "service.luau"
 [[panel]]
 id = "panel"
 entry = "panel.luau"
-width = 480
+width = 700
 height = 720
+# Up/Down move the Sessions tab selection and Return (or keypad Enter) runs it (onKey in
+# panel.luau). Return is captured here rather than read from the filter input's
+# onSubmit, which only fires while that input holds the focus.
+capture_keys = ["up", "down", "Return", "KP_Enter"]
 placement = "attached"
 open_near_click = true
 dismiss_on_outside_click = true
@@ -109,6 +125,20 @@ entry = "claude-cockpit.luau"
   [widget.actions]
   left = "panel-toggle nightwatch75/claude-cockpit:panel"
 
+  # classic: glyph + usage percentages. activity: glyph + one dot per live
+  # session + session/weekly fill rings (keeps the service polling live
+  # sessions every 2s while the widget exists).
+  [[widget.setting]]
+  key = "display_mode"
+  type = "select"
+  label_key = "settings.display_mode.label"
+  description_key = "settings.display_mode.description"
+  default = "activity"
+  options = [
+    { value = "classic", label_key = "settings.display_mode.options.classic" },
+    { value = "activity", label_key = "settings.display_mode.options.activity" },
+  ]
+
   [[widget.setting]]
   key = "glyph"
   type = "glyph"
@@ -116,10 +146,11 @@ entry = "claude-cockpit.luau"
   description_key = "settings.glyph.description"
   default = "robot"
 
-  # What rides beside the glyph: the 5-hour session window, the 7-day weekly
-  # one (the same two numbers jrohland/claudecode's pill shows), both, or
-  # neither — read straight off the state the service already publishes, no
-  # extra fetch either way.
+  # Which usage windows the widget shows, in both modes (activity draws a
+  # ring before each): the 5-hour session window, the 7-day weekly one (the
+  # same two numbers jrohland/claudecode's pill shows), both, or neither —
+  # read straight off the state the service already publishes, no extra
+  # fetch either way.
   [[widget.setting]]
   key = "usage_percent_display"
   type = "select"

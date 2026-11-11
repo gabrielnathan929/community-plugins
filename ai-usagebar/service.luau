@@ -6,10 +6,12 @@
 -- `ai-usagebar` is a declared dependency, so it is expected on PATH.
 local COMMAND = "ai-usagebar usage --json"
 local shared = require("./shared.luau")
+local prioritiesUnsupported = false
 
 local function intervalMs()
     local minutes = tonumber(noctalia.getConfig("refresh_minutes")) or 5
-    if minutes < 1 then minutes = 1 end
+    if minutes ~= minutes or minutes == math.huge or minutes == -math.huge then minutes = 5 end
+    minutes = math.max(1, math.min(120, minutes))
     return math.floor(minutes * 60 * 1000)
 end
 
@@ -68,7 +70,13 @@ local function safeText(value)
 
     -- Capped before the redaction: the patterns are the expensive part, and a
     -- callback that overruns its CPU budget loses the whole report.
-    if #text > 200 then text = string.sub(text, 1, 200) .. "..." end
+    if #text > 200 then
+        local boundary = 200
+        while boundary > 0 and text:byte(boundary + 1) >= 128 and text:byte(boundary + 1) < 192 do
+            boundary = boundary - 1
+        end
+        text = string.sub(text, 1, boundary) .. "..."
+    end
 
     -- A literal search gates each keyword's patterns. Gating on the separator
     -- does not work: `=` and `:` turn up in ratios, clock times and URLs.
@@ -157,6 +165,59 @@ local function classify(result)
     return failure("no_data", stderr)
 end
 
+-- The setup view asks for this local catalog; quota ticks never collect it.
+local catalogInFlight = false
+local lastCatalogStart = nil
+
+local function publicCatalog(document)
+    if type(document) ~= "table" or type(document.vendors) ~= "table" then return nil end
+    local vendors, count = {}, 0
+    for key, vendor in pairs(document.vendors) do
+        if type(key) ~= "number" or key % 1 ~= 0 or key < 1 or key > #document.vendors
+            or type(vendor) ~= "table" then return nil end
+        count = count + 1
+    end
+    if count ~= #document.vendors then return nil end
+    for _, vendor in ipairs(document.vendors) do
+        if type(vendor.id) ~= "string" or #vendor.id > 80
+            or not vendor.id:match("^[a-z0-9][a-z0-9_%-]*$")
+            or type(vendor.name) ~= "string"
+            or type(vendor.enabled) ~= "boolean"
+            or type(vendor.configured) ~= "boolean"
+            or type(vendor.needs_credential) ~= "boolean" then return nil end
+        vendors[#vendors + 1] = {
+            id = vendor.id,
+            name = safeText(vendor.name),
+            enabled = vendor.enabled,
+            configured = vendor.configured,
+            needs_credential = vendor.needs_credential,
+        }
+    end
+    return { vendors = vendors }
+end
+
+local function loadCatalog()
+    local now = noctalia.nowMs()
+    if catalogInFlight or (lastCatalogStart ~= nil and now - lastCatalogStart < 2000) then return end
+    catalogInFlight = true
+    lastCatalogStart = now
+    noctalia.state.set("catalog_loading", true)
+    local started = noctalia.runAsync("ai-usagebar vendors --json", function(result)
+        local decoded = result ~= nil and not result.timedOut and result.exitCode == 0
+            and noctalia.json.decode(result.stdout or "") or nil
+        local catalog = publicCatalog(decoded)
+        if catalog ~= nil then noctalia.state.set("catalog", catalog) end
+        noctalia.state.set("catalog_error", catalog == nil)
+        catalogInFlight = false
+        noctalia.state.set("catalog_loading", false)
+    end, 5000)
+    if not started then
+        catalogInFlight = false
+        noctalia.state.set("catalog_error", true)
+        noctalia.state.set("catalog_loading", false)
+    end
+end
+
 local inFlight = false
 local pendingRefresh = false
 
@@ -209,9 +270,22 @@ local function refresh()
     noctalia.state.set("refresh_queued", false)
     noctalia.state.set("polling", true)
 
-    local started = noctalia.runAsync(COMMAND, function(result)
+    local priorities = noctalia.getConfig("show_priorities") == true and not prioritiesUnsupported
+    local command = priorities and (COMMAND .. " --priorities") or COMMAND
+    local started = noctalia.runAsync(command, function(result)
         inFlight = false
         noctalia.state.set("polling", false)
+
+        local stderr = tostring(result and result.stderr or ""):lower()
+        if priorities and result ~= nil and not result.timedOut and result.exitCode ~= 0
+            and stderr:find("--priorities", 1, true)
+            and (stderr:find("unexpected argument", 1, true)
+                or stderr:find("unrecognized option", 1, true) or stderr:find("unknown option", 1, true)) then
+            prioritiesUnsupported = true
+            noctalia.state.set("priorities_supported", false)
+            queueRefresh()
+            return
+        end
 
         local decoded = result ~= nil and not result.timedOut
             and noctalia.json.decode(result.stdout or "") or nil
@@ -242,6 +316,7 @@ end
 
 noctalia.state.watch("command", function(value)
     if type(value) == "table" and value.action == "refresh" then refresh() end
+    if type(value) == "table" and value.action == "catalog" then loadCatalog() end
 end)
 
 function update()
@@ -251,12 +326,15 @@ function update()
 end
 
 function onConfigChanged()
+    prioritiesUnsupported = false
+    noctalia.state.set("priorities_supported", nil)
     noctalia.setUpdateInterval(intervalMs())
     refresh()
 end
 
 function onIpc(event, payload)
     if event == "refresh" then refresh() end
+    if event == "catalog" then loadCatalog() end
     -- `select <provider-id>` points the panel at one provider from a script.
     if event == "select" and type(payload) == "string" and payload ~= "" then
         noctalia.state.set("selected", payload)

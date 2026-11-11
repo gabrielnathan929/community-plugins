@@ -7,11 +7,11 @@
 
 id = "dragged/cider"
 name = "Cider"
-version = "1.10.0"
-plugin_api = 24
+version = "1.11.2"
+plugin_api = 43
 author = "dragged"
 license = "MIT"
-dependencies = ["python3", "gtk3", "gtk-layer-shell", "python-gobject"]
+dependencies = ["python3", "gtk3", "gtk-layer-shell", "python-gobject", "bash", "sh", "pkill", "coreutils", "niri", "hyprctl", "umbriel", "xdotool", "parec"]
 tags = ["media", "music", "audio", "bar", "panel", "service"]
 icon = "music"
 description = "Cider now-playing alerts and a sticky karaoke lyrics HUD."
@@ -58,13 +58,14 @@ max = 20000
 step = 500
 visible_when = { key = "display_mode", values = ["notification", "osd"] }
 
+# ── Cider windows ───────────────────────────────────────────────────────────
+
 [[setting]]
-key = "save_to_history"
+key = "remember_workspace"
 type = "bool"
-label_key = "settings.save_to_history.label"
-description_key = "settings.save_to_history.description"
+label_key = "settings.remember_workspace.label"
+description_key = "settings.remember_workspace.description"
 default = false
-visible_when = { key = "display_mode", values = ["notification"] }
 
 # ── Lyrics HUD ──────────────────────────────────────────────────────────────
 

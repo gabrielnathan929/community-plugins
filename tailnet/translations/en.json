@@ -52,6 +52,10 @@
       "description": "Hide Mullvad VPN exit nodes from the peer list.",
       "label": "Hide Mullvad exit nodes"
     },
+    "hide_not_installed": {
+      "description": "Hide the widget when Tailscale is not installed.",
+      "label": "Hide widget when Tailscale is missing"
+    },
     "hide_offline": {
       "description": "Hide offline peers from the panel and launcher lists.",
       "label": "Hide offline peers"

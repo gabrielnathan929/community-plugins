@@ -62,14 +62,14 @@ local function build_artist()
 		table.insert(
 			song_rows,
 			common.media_row(t, "ar-" .. i, function()
-				request("play_with_queue", { item = t, index = i, queue = data.artist_tracks })
+				request("replace_queue_and_play", { item = t, index = i, queue = data.artist_tracks })
 			end, state.data.player.id == t.id)
 		)
 	end
 	table.insert(child, ui.column({ key = "ar-songs-col", gap = 0, radius = theme.radius }, song_rows))
 
 	if #(data.artist_related or {}) > 0 then
-		table.insert(child, ui.separator({ key = "sep-ar-rel", color = "outline/0.3" }))
+		table.insert(child, ui.separator({ key = "sep-ar-rel", color = "outline_variant/0.3" }))
 		table.insert(
 			child,
 			ui.label({
@@ -114,7 +114,7 @@ local function build_artist()
 						"playlist",
 						38,
 						"primary",
-						card_hovered and "primary/0.2" or "surface_variant/0.6"
+						card_hovered and "primary/0.2" or "surface_container/0.6"
 					),
 					ui.column({ gap = 2, flexGrow = 1, radius = theme.radius }, {
 						ui.label({

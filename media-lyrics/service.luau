@@ -125,28 +125,29 @@ local function sanitizePart(s)
   return lyrics_lib.sanitizePart(s)
 end
 
-local function cachePath(artist, title)
-  local dir = noctalia.pluginDataDir()
-  if not dir then return nil end
-  return dir .. "/lyrics/" .. sanitizePart(artist) .. "__" .. sanitizePart(title) .. ".lrc"
+local function cachePlan(artist, title)
+  return lyrics_lib.cachePaths(noctalia.pluginDataDir(), artist, title)
 end
 
 local function loadCachedLyrics(artist, title)
   if noctalia.getConfig("use_cache") ~= true then return nil end
-  local path = cachePath(artist, title)
-  if not path then return nil end
-  local raw = noctalia.readFile(path)
+  local plan = cachePlan(artist, title)
+  if not plan then return nil end
+  local raw = noctalia.readFile(plan.file)
   if raw and trim(raw) ~= "" then return raw end
   return nil
 end
 
 local function cacheLyrics(artist, title, synced, plain)
   if noctalia.getConfig("use_cache") ~= true then return end
-  local path = cachePath(artist, title)
-  if not path then return end
+  local plan = cachePlan(artist, title)
+  if not plan then return end
   local body = synced ~= "" and synced or plain
   if trim(body) == "" then return end
-  noctalia.writeFile(path, body)
+  -- the folder is created here, not at startup: only a successful lookup
+  -- writes anything, and an empty cache directory would just be litter.
+  noctalia.mkdirAll(plan.dir)
+  noctalia.writeFile(plan.file, body)
 end
 
 local function tryLocalLyrics(artist, title)
@@ -164,6 +165,20 @@ local function tryLocalLyrics(artist, title)
     if raw and trim(raw) ~= "" then return raw end
   end
   return nil
+end
+
+-- Word-timed lyrics lookup (lrcmux.dev, aggregates enhanced LRCs): the only
+-- source in the chain that carries per-word times, which is what the karaoke
+-- sweep rides on.
+local function lrcmuxUrl(artist, title, album, durationSec)
+  local url = "https://api.lrcmux.dev/get?format=json&level=word"
+    .. "&title=" .. noctalia.string.urlEncode(title)
+    .. "&artist=" .. noctalia.string.urlEncode(artist)
+  if album ~= "" then url = url .. "&album=" .. noctalia.string.urlEncode(album) end
+  if durationSec and durationSec > 0 then
+    url = url .. "&duration=" .. tostring(math.floor(durationSec + 0.5))
+  end
+  return url
 end
 
 -- ============================= lyrics pipeline =============================
@@ -221,6 +236,30 @@ local function finishError(msg)
   publish()
 end
 
+-- Per-word times make the karaoke sweep track the voice. When the text on
+-- screen carries none, ask the word-timed source for the same recording and
+-- swap it in ONLY when the lyrics match line for line: the text the configured
+-- provider gave is never swapped for another variant.
+local function tryWordUpgrade(artist, title, album, durationSec, key, gen, shownSynced)
+  noctalia.runAsync({ "curl", "-sSf", "-m", "8", "-4",
+    lrcmuxUrl(artist, title, album, durationSec) }, function(res)
+    if gen ~= fetchGeneration or res.exitCode ~= 0 then return end
+    local data = type(res.stdout) == "string" and noctalia.json.decode(res.stdout) or nil
+    local track = type(data) == "table" and data.track or nil
+    if type(data) ~= "table" or type(data.lines) ~= "table"
+      or not lyrics_lib.trackMatches({ title = title, artist = artist,
+          durationSec = durationSec }, type(track) == "table" and track or {}) then
+      return
+    end
+    local lrc = lyrics_lib.wordRowsToLrc(data.lines)
+    if lrc == "" or not lrc:find("<%d+:%d%d") then return end
+    if not lyrics_lib.textLooksSame(shownSynced, lrc) then return end
+    if acceptLyrics("lrcmux", lrc, "", key) then
+      cacheLyrics(artist, title, lrc, "")
+    end
+  end)
+end
+
 -- NetEase keeps placeholder "lyrics" for instrumentals / missing words
 -- (e.g. "[00:00.000] 纯音乐，请欣赏" = "instrumental music, enjoy", or
 -- "暂无歌词" = "no lyrics yet"). Those are NOT lyrics: treat the text as
@@ -266,6 +305,12 @@ local function loadLyricsForTrack(artist, title, album, durationSec, key, embedd
   local cached = loadCachedLyrics(title == "" and "" or artist, title)
   if cached and not isPlaceholderLyrics(cached) then
     acceptLyrics(noctalia.tr("provider.cache"), cached, "", key)
+    -- Entries fetched before the word-timed source existed carry no word times.
+    -- Show them at once, then quietly upgrade — once per track, because the
+    -- upgraded text is re-cached with its markers.
+    if not cached:find("<%d+:%d%d") then
+      tryWordUpgrade(artist, title, album, durationSec, key, gen, cached)
+    end
     return
   end
 
@@ -320,6 +365,9 @@ local function loadLyricsForTrack(artist, title, album, durationSec, key, embedd
   local function acceptAndCache(provider, synced, plain)
     if acceptLyrics(provider, synced, plain, key) then
       cacheLyrics(artist, title, synced, plain)
+      if synced ~= "" and not synced:find("<%d+:%d%d") then
+        tryWordUpgrade(artist, title, album, durationSec, key, gen, synced)
+      end
       return true
     end
     return false
@@ -335,18 +383,15 @@ local function loadLyricsForTrack(artist, title, album, durationSec, key, embedd
   -- kept as a fallback while better candidates are still hunted, and an
   -- LRCLIB plain-only hit stashed by the caller is used only when NetEase
   -- produced nothing at all.
-  local function fetchNetEaseFallback(artist, title, key, stash)
+  -- Online provider. A miss hands the accumulated plain-text stash to
+  -- `nextFn`, so the LAST provider in the configured order is the one that
+  -- settles the track (accepting a stash, or reporting empty / unreachable).
+  local function fetchNetEase(nextFn, stash)
     if gen ~= fetchGeneration then return end
-    -- stash = { provider, synced, plain } (e.g. an LRCLIB plain-only hit).
+    -- stash = { provider, synced, plain } (a plain-only hit from the other source).
     local function settle(isError)
       if gen ~= fetchGeneration then return end
-      if stash then
-        acceptAndCache(stash.provider, stash.synced, stash.plain)
-      elseif isError then
-        finishError(noctalia.tr("service.lyrics-unreachable"))
-      else
-        finishEmpty()
-      end
+      nextFn(stash, isError)
     end
     local searchAttempt = 0
     local function trySearch(query)
@@ -380,21 +425,28 @@ local function loadLyricsForTrack(artist, title, album, durationSec, key, embedd
           if gen ~= fetchGeneration then return end
           if i > #ranked or tried >= 3 then
             if firstPlain then
-              acceptAndCache("NetEase", firstPlain, "")
+              nextFn(stash or { provider = "NetEase", synced = "", plain = firstPlain })
             else
               settle(anyNetworkError)
             end
             return
           end
           tried = tried + 1
-          local lyricUrl = "https://music.163.com/api/song/lyric?os=pc&id="
-            .. tostring(ranked[i].id) .. "&lv=-1&kv=-1&tv=-1"
+          -- v1 with yv=1 returns the word-timed `yrc` alongside `lrc`.
+          local lyricUrl = "https://music.163.com/api/song/lyric/v1?id="
+            .. tostring(ranked[i].id) .. "&lv=1&yv=1&tv=-1"
           httpGetH(lyricUrl, neteaseHeaders, function(resp)
             if gen ~= fetchGeneration then return end
             if resp.ok and type(resp.body) == "string" then
               local d = noctalia.json.decode(resp.body)
-              local lrc = type(d) == "table" and d.lrc and type(d.lrc.lyric) == "string"
-                and trim(d.lrc.lyric) or ""
+              -- word-timed yrc first: the karaoke sweep rides on per-word times
+              local yrc = type(d) == "table" and d.yrc and type(d.yrc.lyric) == "string"
+                and d.yrc.lyric or ""
+              local lrc = lyrics_lib.yrcToLrc(yrc)
+              if lrc == "" then
+                lrc = type(d) == "table" and d.lrc and type(d.lrc.lyric) == "string"
+                  and trim(d.lrc.lyric) or ""
+              end
               if lrc ~= "" then
                 lrc = stripNetEaseMeta(lrc)
                 if trim(lrc) ~= "" then
@@ -430,6 +482,30 @@ local function loadLyricsForTrack(artist, title, album, durationSec, key, embedd
     end
   end
 
+  -- Word-timed source. Same contract as the others; a wrong recording is
+  -- refused (strict match) and the chain moves on — a remix's timings over the
+  -- original would desync every line.
+  local function fetchLrcmux(nextFn, stash)
+    if gen ~= fetchGeneration then return end
+    httpGet(lrcmuxUrl(artist, title, album, durationSec), function(resp)
+      if gen ~= fetchGeneration then return end
+      if resp.ok and type(resp.body) == "string" then
+        local data = noctalia.json.decode(resp.body)
+        local track = type(data) == "table" and data.track or nil
+        if type(data) == "table" and type(data.lines) == "table"
+          and lyrics_lib.trackMatches({ title = title, artist = artist,
+              durationSec = durationSec }, type(track) == "table" and track or {}) then
+          local lrc = lyrics_lib.wordRowsToLrc(data.lines)
+          if lrc ~= "" and acceptAndCache("lrcmux", lrc, "") then return end
+        end
+      end
+      nextFn(stash)
+    end)
+  end
+
+  -- Online provider. Same contract as fetchNetEase: a miss calls nextFn with
+  -- the best plain text seen so far (its own, or the one it was handed).
+  local function fetchLrclib(nextFn, stash)
   httpGet(getUrl, function(resp)
     if gen ~= fetchGeneration then return end
     local okData = nil
@@ -449,10 +525,9 @@ local function loadLyricsForTrack(artist, title, album, durationSec, key, embedd
       elseif plain ~= "" then
         -- LRCLIB has only untimed text: hunt for a synced copy on NetEase
         -- first; the plain text is the fallback if NetEase has nothing.
-        fetchNetEaseFallback(artist, title, key,
-          { provider = "LRCLIB", synced = "", plain = plain })
+        nextFn(stash or { provider = "LRCLIB", synced = "", plain = plain })
       else
-        fetchNetEaseFallback(artist, title, key)
+        nextFn(stash)
       end
       return
     end
@@ -462,7 +537,7 @@ local function loadLyricsForTrack(artist, title, album, durationSec, key, embedd
     -- completed. music.163.com is a different host, so try the NetEase
     -- fallback before giving up.
     if not resp.ok and resp.exit ~= 22 then
-      fetchNetEaseFallback(artist, title, key)
+      nextFn(stash)
       return
     end
 
@@ -497,14 +572,13 @@ local function loadLyricsForTrack(artist, title, album, durationSec, key, embedd
               local plain = trim(best.plainLyrics or "")
               if synced ~= "" then
                 if not acceptAndCache("LRCLIB", synced, plain) then
-                  fetchNetEaseFallback(artist, title, key, plain ~= "" and
-                    { provider = "LRCLIB", synced = "", plain = plain } or nil)
+                  nextFn(stash or (plain ~= "" and
+                    { provider = "LRCLIB", synced = "", plain = plain } or nil))
                 end
               elseif plain ~= "" then
-                fetchNetEaseFallback(artist, title, key,
-                  { provider = "LRCLIB", synced = "", plain = plain })
+                nextFn(stash or { provider = "LRCLIB", synced = "", plain = plain })
               else
-                fetchNetEaseFallback(artist, title, key)
+                nextFn(stash)
               end
             else
               -- Multiple top candidates: offer a manual choice. Cap the list
@@ -531,11 +605,38 @@ local function loadLyricsForTrack(artist, title, album, durationSec, key, embedd
           end
         end
       end
-      -- LRCLIB had no usable hit (or its own transport failed): NetEase is
-      -- the last resort.
-      fetchNetEaseFallback(artist, title, key)
+      -- this source had no usable hit (or its own transport failed)
+      nextFn(stash)
     end)
   end)
+  end -- fetchLrclib
+
+  -- Remote stage: the two online providers, in the configured order. The
+  -- first one's miss hands its plain-text stash to the second, which settles
+  -- the track: a stash wins, otherwise empty or unreachable.
+  local function finalSettle(stash, isError)
+    if stash then
+      acceptAndCache(stash.provider, stash.synced, stash.plain)
+    elseif isError then
+      finishError(noctalia.tr("service.lyrics-unreachable"))
+    else
+      finishEmpty()
+    end
+  end
+  local stages = { lrclib = fetchLrclib, netease = fetchNetEase, lrcmux = fetchLrcmux }
+  local order = lyrics_lib.sourceOrder(noctalia.getConfig("source_order"))
+  local stageIdx = 0
+  local function runStage(stash, isError)
+    if gen ~= fetchGeneration then return end
+    stageIdx = stageIdx + 1
+    local fn = stages[order[stageIdx]]
+    if fn then
+      fn(runStage, stash)
+    else
+      finalSettle(stash, isError)
+    end
+  end
+  runStage(nil, false)
 end
 
 local function invalidateLyrics()
@@ -700,6 +801,87 @@ end
 
 local refreshInFlight = false
 
+-- ── artwork resolution ─────────────────────────────────────────────────────
+-- MPRIS art_url is either a local path (file:// URI, e.g. mpv/zen) or an HTTP(S)
+-- URL (Spotify, Apple Music, web players -> i.scdn.co, etc). ui.image only
+-- renders LOCAL files, so a remote URL must be downloaded first. Without this
+-- the host logged:
+--   [ui-tree] ui tree: image failed to load '<pluginDir>/https://i.scdn.co/...'
+-- and the panel showed an empty cover box (issue #705).
+local ART_DIR = "/art"
+local ART_REVISION_SLOTS = 2 -- cover-0/cover-1: alternating slots dodge a stale read
+local artRevision = 0
+local artCache = {} -- remote url -> local path (per-session memo, avoids re-download)
+
+local function isRemoteArt(url)
+  return type(url) == "string" and (url:match("^https?://") ~= nil)
+end
+
+local function artDir()
+  local dir = noctalia.pluginDataDir()
+  if not dir then return nil end
+  return dir .. ART_DIR
+end
+
+local function artDest(ext)
+  local dir = artDir()
+  if not dir then return nil end
+  return dir .. "/cover-" .. tostring(artRevision % ART_REVISION_SLOTS) .. ext
+end
+
+-- Publish a snapshot carrying a concrete local path (or "" while unresolved).
+local function publishArt(path)
+  snapshot.artUrl = path or ""
+  publish()
+end
+
+-- Resolve an MPRIS art_url to a filesystem path ui.image can render.
+-- syncFn(path) is called immediately with the known-local value (or "" for a
+-- remote URL still being fetched) so the caller keeps its normal control flow.
+local function resolveArt(url, key, syncFn)
+  if type(url) ~= "string" or url == "" then
+    syncFn("")
+    return
+  end
+  -- file:// URI or a bare local path -> already renderable
+  if not isRemoteArt(url) then
+    syncFn((url:gsub("^file://", "")))
+    return
+  end
+  -- remote: serve a memoized copy when we already downloaded this exact URL
+  local memo = artCache[url]
+  if memo and noctalia.fileExists(memo) then
+    syncFn(memo)
+    return
+  end
+  local dir = artDir()
+  if not dir then
+    syncFn("")
+    return
+  end
+
+  -- hand the UI the cached path instantly, then refresh after the download
+  syncFn("")
+
+  artRevision = artRevision + 1
+  local revision = artRevision
+  local ext = url:match("%.png") and ".png" or url:match("%.webp") and ".webp"
+    or url:match("%.jpe?g") and ".jpg" or ".jpg"
+  local destination = artDest(ext)
+  if not destination then return end
+
+  noctalia.mkdirAll(dir)
+  noctalia.download(url, destination, function(ok)
+    if not ok then return end
+    -- a newer track started while this download was in flight
+    if revision ~= artRevision then return end
+    if not noctalia.fileExists(destination) then return end
+    artCache[url] = destination
+    -- same track still playing? then show the art we just fetched
+    if currentTrackKey == key then publishArt(destination) end
+  end)
+end
+
 -- Apply a single player's fields to the snapshot and (on track change) load
 -- lyrics. Shared by the active-player path and the allowlist fallback.
 -- Declared BEFORE refreshPlayer so it is a visible upvalue there.
@@ -707,8 +889,7 @@ local function applyPlayer(f)
     local title = parseBusctlVariant(f.title) or ""
     local artist = parseBusctlVariant(f.artists) or ""
     local album = parseBusctlVariant(f.album) or ""
-    local artUrl = parseBusctlVariant(f.art_url) or ""
-    artUrl = artUrl:gsub("^file://", "")
+    local rawArtUrl = parseBusctlVariant(f.art_url) or ""
     local playing = (parseBusctlVariant(f.playback_status) == "Playing")
     local lengthUs = tonumber(parseBusctlVariant(f.length_us)) or 0
     local posUs = tonumber(parseBusctlVariant(f.position_us)) or 0
@@ -724,12 +905,14 @@ local function applyPlayer(f)
     local key = ident .. "|" .. title .. "|" .. artist .. "|" .. tostring(lengthUs)
     local trackChanged = (not snapshot.hasPlayer) or (currentTrackKey ~= key)
 
+    -- art may be a remote URL: resolve to a local file (async) before rendering
+    resolveArt(rawArtUrl, key, function(path) snapshot.artUrl = path end)
+
     snapshot.hasPlayer = true
     snapshot.playerName = ident
     snapshot.title = title
     snapshot.artist = artist
     snapshot.album = album
-    snapshot.artUrl = artUrl
     snapshot.playing = playing
     snapshot.canSeek = canSeek
     snapshot.canGoNext = canNext
@@ -781,9 +964,9 @@ local function refreshPlayer()
     local title = parseBusctlVariant(f.title) or ""
     local artist = parseBusctlVariant(f.artists) or ""
     local album = parseBusctlVariant(f.album) or ""
-    -- art_url comes as file:// URI; ui.image expects a filesystem path
-    local artUrl = parseBusctlVariant(f.art_url) or ""
-    artUrl = artUrl:gsub("^file://", "")
+    -- art_url is a file:// URI (local path) or an HTTP(S) URL (Spotify/web
+    -- players); resolveArt turns either into a path ui.image can render.
+    local rawArtUrl = parseBusctlVariant(f.art_url) or ""
     local playing = (parseBusctlVariant(f.playback_status) == "Playing")
     local lengthUs = tonumber(parseBusctlVariant(f.length_us)) or 0
     local posUs = tonumber(parseBusctlVariant(f.position_us)) or 0

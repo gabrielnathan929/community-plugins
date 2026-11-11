@@ -1,6 +1,7 @@
 # DNF Updater
+![dnf-updater thumbnail](thumbnail.webp)
 
-DNF Updater monitors and manages pending DNF5 and Flatpak updates directly from the Noctalia bar. It provides a lightweight update badge in the bar, per-package selection to skip or apply specific upgrades, download size estimation, and safe execution through Polkit (`pkexec`) or an interactive terminal.
+DNF Updater monitors and manages pending DNF5 and Flatpak updates directly from the Noctalia bar. It provides a lightweight update badge in the bar, per-package selection to skip or apply specific upgrades, package search filtering, reboot required detection, download size estimation, and safe execution through Polkit or an interactive terminal.
 
 ## Plugin
 
@@ -19,21 +20,23 @@ The plugin expects the following dependencies on `$PATH`:
 
 ### Passwordless Background Upgrades (Optional)
 
-To enable seamless background upgrades without a password prompt (matching Flatpak's default behavior for `wheel` users), install the included hardened helper script and Polkit rule:
+To enable background upgrades without a password prompt, install the included hardened helper script and Polkit rule with:
 
 ```sh
-# 1. Install the privileged helper (restricts root execution strictly to upgrades)
-sudo install -Dm755 scripts/dnf-updater-helper.sh /usr/local/bin/dnf-updater-helper
-
-# 2. Install the scoped Polkit authorization rule
-sudo install -Dm644 polkit/50-dnf-updater.rules /etc/polkit-1/rules.d/50-dnf-updater.rules
+curl -fsSL https://raw.githubusercontent.com/strob3/dnf-updater/main/scripts/install.sh | sudo bash
 ```
 
-To remove it later:
+Alternatively, if you have cloned the repository locally:
 
 ```sh
-sudo rm /usr/local/bin/dnf-updater-helper
-sudo rm /etc/polkit-1/rules.d/50-dnf-updater.rules
+sudo ./scripts/install.sh
+```
+
+To remove the helper and Polkit rule later:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/strob3/dnf-updater/main/scripts/install.sh | sudo bash -s -- --uninstall
+# or: sudo ./scripts/install.sh --uninstall
 ```
 
 ## Usage
@@ -73,19 +76,21 @@ alias dnf-check="noctalia msg plugin strob3/dnf-updater:service service check"
 | **Left Click** | Bar Widget | Open or close the updates panel |
 | **Right Click** | Bar Widget | Refresh the updates |
 | **Middle Click** | Bar Widget | Open plugin settings in *Settings → Plugins* |
+| **Search Input** | Panel Top | Filter packages in real time by name, repo, or ref |
 | **Click Row** | Package Row | Toggle package selection (include or exclude from update) |
 | **Chevron Click** | Section Header | Collapse or expand DNF or Flatpak package section |
 | **Check Click** | Section Header | Select all or deselect all packages in section |
+| **Refresh Icon** | Panel Header | Re-check repositories for latest updates |
 | **Update Button** | Panel Bottom | Apply updates for all selected packages |
-| **Check Now** | Panel Bottom | Re-check repositories for latest updates |
 
 ## Settings
 
 | Setting | Type | Default | Description |
 | --- | --- | --- | --- |
-| `check_interval` | `int` | `30` | Interval in minutes between automatic checks (`0` disables scheduled checks). |
+| `check_interval` | `int` | `30` | Interval in minutes between automatic checks (`0` to `10080`, `0` disables). |
 | `enable_dnf` | `bool` | `true` | Enable checking and upgrading DNF5 system packages. |
 | `enable_flatpak` | `bool` | `true` | Enable checking and upgrading Flatpak applications. |
+| `include_flatpak_runtimes` | `bool` | `false` | Include Flatpak runtime and extension updates alongside applications. |
 | `show_widget_when_clean` | `bool` | `true` | Show the widget icon in the bar even when system is up to date. |
 | `notify_on_updates` | `bool` | `true` | Send a desktop notification when new pending updates are found. |
 | `update_in_terminal` | `bool` | `true` | Launch update commands inside your terminal emulator instead of background Polkit execution. |
@@ -105,9 +110,10 @@ noctalia msg plugin strob3/dnf-updater:service service update
 
 ## Notes
 
-- **Privilege Separation**: Noctalia never runs as root. System upgrades invoke `pkexec dnf5 upgrade` with explicit arguments, or launch inside the user's terminal emulator when configured.
+- **Privilege Separation**: Noctalia never runs as root. System upgrades invoke hardened helper script with explicit arguments via Polkit, or launch inside the user's terminal emulator when configured.
 - **Selective Upgrades**: When packages are deselected, DNF5 is invoked with `--exclude=<pkg>` arguments and Flatpak is invoked with only selected application IDs.
 - **Background Checks**: Update queries use non-blocking JSON queries (`dnf5 check-upgrade --json` and `flatpak remote-ls --updates -j`) to prevent freezing the shell.
+- **Reboot Detection**: Checks `dnf needs-restarting -r` to detect when core packages (kernel, systemd, glibc) require a system restart.
 
 ## License
 [MIT](LICENSE)

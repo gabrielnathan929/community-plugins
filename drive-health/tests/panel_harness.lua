@@ -79,7 +79,7 @@ state.snapshot = {
     expected_version = "1.0.0", helper_available = true, authorization_available = true,
     enable_command = "pkexec '/usr/local/libexec/noctalia-drive-health/manage-collector.sh' start",
     disable_command = "pkexec '/usr/local/libexec/noctalia-drive-health/manage-collector.sh' pause",
-    install_command = "pkexec '/mock/plugin/packaging/install-system-collector.sh' --interval-minutes 15",
+    install_command = "pkexec bash '/mock/plugin/packaging/install-system-collector.sh' --interval-minutes 15",
     uninstall_command = "pkexec '/usr/local/libexec/noctalia-drive-health/uninstall-collector.sh'",
     interval_command = "pkexec '/usr/local/libexec/noctalia-drive-health/set-collector-interval.sh' 15",
     smart_refresh_minutes = 15 },
@@ -212,6 +212,24 @@ assert(not containsText(rendered, "collector.title") and containsText(rendered, 
 onToggleCollectorSettingsClicked()
 state.snapshot.system_collector.status = "healthy"
 state.snapshot.system_collector.version = "1.0.0"
+watchers.snapshot(state.snapshot)
+state.snapshot.system_collector.is_nixos = true
+state.snapshot.system_collector.nixos_hint = "collector.nixos_hint"
+watchers.snapshot(state.snapshot)
+onToggleCollectorSettingsClicked()
+assert(containsText(rendered, "collector.nixos_hint"), "NixOS collector settings omitted the declarative hint")
+assert(not containsText(rendered, "collector.install") and not containsText(rendered, "collector.upgrade")
+  and not containsText(rendered, "collector.remove"),
+  "NixOS collector settings offered imperative lifecycle buttons")
+onToggleCollectorSettingsClicked()
+state.snapshot.system_collector.status = "upgrade-required"
+watchers.snapshot(state.snapshot)
+assert(containsText(rendered, "collector.nixos_hint") and not containsText(rendered, "collector.upgrade")
+  and not containsText(rendered, "collector.copy_install"),
+  "NixOS collector card offered the imperative upgrade path")
+state.snapshot.system_collector.status = "healthy"
+state.snapshot.system_collector.is_nixos = nil
+state.snapshot.system_collector.nixos_hint = nil
 watchers.snapshot(state.snapshot)
 configValues.system_collector_enabled = false
 state.snapshot.system_collector.enabled = false

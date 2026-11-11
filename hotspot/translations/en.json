@@ -45,6 +45,10 @@
     }
   },
   "settings": {
+    "autostart": {
+      "description": "Automatically start the hotspot when the system boots.",
+      "label": "Autostart hotspot"
+    },
     "glyph": {
       "label": "Bar glyph"
     },

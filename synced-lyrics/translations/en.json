@@ -1,0 +1,123 @@
+{
+  "panel": {
+    "available-sources": "Click any provider to switch lyrics instantly",
+    "close": "Close",
+    "karaoke-badge": "Karaoke (Syllable)",
+    "line-badge": "Line-synced",
+    "no-media": "No media is currently playing",
+    "no-sources": "No lyrics found from any provider",
+    "refresh": "Refresh lyrics",
+    "select-source": "Select Lyric Provider",
+    "title": "Lyrics Sources",
+    "word-badge": "Karaoke (Word)"
+  },
+  "settings": {
+    "active-color": {
+      "description": "Theme color token for the currently sung syllable/word (e.g. primary, tertiary, secondary)",
+      "label": "Active Syllable Color"
+    },
+    "auto-hide": {
+      "description": "Hide the bar widget completely when media is stopped or no player is running",
+      "label": "Auto-hide when stopped"
+    },
+    "betterlyrics-key": {
+      "description": "Optional API key for uncached queries on api.betterlyrics.org",
+      "label": "BetterLyrics API Key"
+    },
+    "font-size": {
+      "description": "Text size of lyrics displayed on the bar",
+      "label": "Font Size"
+    },
+    "hide-when-paused": {
+      "description": "Hide the bar widget when media is paused",
+      "label": "Hide when paused"
+    },
+    "invert-scroll": {
+      "description": "Invert mouse wheel scroll direction when adjusting timing offset",
+      "label": "Invert Scroll Direction"
+    },
+    "max-chars": {
+      "description": "Maximum characters shown when character limit mode is selected",
+      "label": "Max Display Characters"
+    },
+    "max-words": {
+      "description": "Maximum number of words displayed before shifting onto the next line chunk",
+      "label": "Max Words Per Line"
+    },
+    "parsenix-base-url": {
+      "description": "Base URL of your deployed Parsenix Spotify Lyrics API instance (e.g. https://your-instance.vercel.app). Requires SP_DC cookie configured server-side.",
+      "label": "Parsenix API Base URL"
+    },
+    "preferred-source": {
+      "description": "Service hierarchy for karaoke and synced lyrics",
+      "label": "Preferred Lyric Provider",
+      "options": {
+        "auto": "Automatic (Parsenix -> Spicy Lyrics -> Apple Music -> LyricsPlus -> BetterLyrics -> Unison -> LRCLIB -> Genius)",
+        "betterlyrics": "BetterLyrics (TTML)",
+        "binimum": "binimum / amlyrics (Apple Music TTML)",
+        "genius": "Genius (Plain Text)",
+        "lrclib": "LRCLIB (Line-synced)",
+        "lyricsplus": "LyricsPlus (Word / Line-synced)",
+        "parsenix": "Parsenix (Spotify Lyrics API)",
+        "spicylyrics": "Spicy Lyrics (Syllable / Line)",
+        "unison": "Unison (Community LRC)"
+      }
+    },
+    "scroll-step": {
+      "description": "Milliseconds added or subtracted per mouse wheel scroll notch",
+      "label": "Scroll Adjustment Step (ms)"
+    },
+    "show-countdown": {
+      "description": "Display seconds remaining until the first vocal line starts",
+      "label": "Show Song Intro Countdown"
+    },
+    "show-glyph": {
+      "description": "Display music glyph next to active lyrics",
+      "label": "Show Music Icon"
+    },
+    "smooth-sweep": {
+      "description": "Progressive character-by-character color sweep across syllables in real time",
+      "label": "Smooth Karaoke Sweep"
+    },
+    "spicylyrics-key": {
+      "description": "API key for querying syllable-level lyrics on api.spicylyrics.org",
+      "label": "Spicy Lyrics API Key"
+    },
+    "spotify-client-id": {
+      "description": "Optional Spotify app Client ID to resolve track IDs for non-Spotify players",
+      "label": "Spotify Client ID"
+    },
+    "spotify-client-secret": {
+      "description": "Optional Spotify app Client Secret for track ID resolution",
+      "label": "Spotify Client Secret"
+    },
+    "sung-color": {
+      "description": "Theme color token for completed syllables (e.g. on_surface, primary)",
+      "label": "Sung Syllable Color"
+    },
+    "timing-offset": {
+      "description": "Shift lyric timing forward or backward in milliseconds (mouse wheel scroll on the bar widget also adjusts on the fly)",
+      "label": "Timing Offset (ms)"
+    },
+    "upcoming-color": {
+      "description": "Theme color token for upcoming syllables (e.g. on_surface_variant, outline)",
+      "label": "Upcoming Syllable Color"
+    },
+    "word-wrapping-mode": {
+      "description": "Strategy for splitting long lyric lines across the bar",
+      "label": "Line Splitting Mode",
+      "options": {
+        "chars": "By character limit (sliding window)",
+        "full": "Full line (no wrapping)",
+        "words": "By word count (shift after max words)"
+      }
+    }
+  },
+  "widget": {
+    "instrumental": "Instrumental",
+    "loading": "Loading lyrics…",
+    "no-lyrics": "No lyrics found",
+    "no-media": "No media playing",
+    "title": "Synced Lyrics"
+  }
+}

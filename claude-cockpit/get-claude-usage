@@ -169,8 +169,13 @@ count_profile_tokens() {
         day_dates="${day_dates:+${day_dates},}${d}"
     done
 
-    find "$proj_dir" -name "*.jsonl" -mtime -31 -exec cat {} + 2>/dev/null \
-        | jq -r -R 'fromjson? | select(.type == "assistant") | "\(.timestamp[:10]) \(.message.model // "unknown") \(.message.usage.input_tokens // 0) \(.message.usage.output_tokens // 0) \(.message.usage.cache_read_input_tokens // 0) \(.message.usage.cache_creation_input_tokens // 0) \(.sessionId // "unknown")"' \
+    # grep drops the non-assistant lines (most of the bytes) before jq parses them.
+    # Assistant lines repeat per content block with the same message.id, requestId
+    # and usage, so the first awk keeps one line per message (the last one, which
+    # carries the final usage) and the counting awk sees each message once.
+    find "$proj_dir" -name "*.jsonl" -mtime -31 -exec grep -h -F '"type":"assistant"' {} + 2>/dev/null \
+        | jq -r -R 'fromjson? | select(.type == "assistant") | "\(.timestamp[:10]) \(.message.model // "unknown") \(.message.usage.input_tokens // 0) \(.message.usage.output_tokens // 0) \(.message.usage.cache_read_input_tokens // 0) \(.message.usage.cache_creation_input_tokens // 0) \(.sessionId // "unknown") \(if .message.id then "\(.message.id):\(.requestId // "")" else (.uuid // "unknown") end)"' \
+        | awk '{ last[$8] = $0 } END { for (k in last) print last[k] }' \
         | awk -v week_start="$WEEK_START" -v month_start="$MONTH_START" -v today="$TODAY" -v day_dates="$day_dates" -v pricing="$PRICING_AWK" '
         BEGIN {
             split(day_dates, dates, ",")
@@ -290,8 +295,10 @@ fetch_profile_usage() {
         local token
         token=$(jq -r '.claudeAiOauth.accessToken // ""' "$creds_file" 2>/dev/null || echo "")
         if [ -n "$token" ]; then
-            api_resp=$(curl -s --max-time 5 \
-                -H "Authorization: Bearer $token" \
+            # The header goes in on stdin (curl -K -): a -H argument would show
+            # the token in /proc/<pid>/cmdline to other local users.
+            api_resp=$(jq -r '"header = " + ("Authorization: Bearer " + .claudeAiOauth.accessToken | @json)' "$creds_file" \
+                | curl -s --max-time 5 -K - \
                 -H "Accept: application/json" \
                 -H "Content-Type: application/json" \
                 -H "User-Agent: claude-code/${CLAUDE_VERSION}" \

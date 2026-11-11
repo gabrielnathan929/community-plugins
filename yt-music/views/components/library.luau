@@ -12,28 +12,49 @@ local function build_library()
 	local filter = view.library_filter or "all"
 
 	local is_refreshing_lib = (data.refreshing_library == true)
+	local sync_btn = ui.button({
+		key = "btn-sync-lib-head",
+		glyph = is_refreshing_lib and "loader" or "refresh",
+		variant = "secondary",
+		controlSize = "md",
+		tooltip = is_refreshing_lib and "Refreshing library..." or "Refresh library",
+		onClick = is_refreshing_lib and nil or function()
+			request("refresh_library", {})
+		end,
+	})
+	local head_children = {
+		ui.column({ gap = 4, radius = theme.radius }, {
+			ui.label({ text = "LIBRARY", fontSize = theme.fontHero, fontWeight = "bold", color = "on_surface" }),
+			ui.label({
+				text = #data.library .. " items in your YouTube Music library",
+				fontSize = theme.fontTitle,
+				color = "on_surface_variant",
+			}),
+		}),
+	}
+	if #data.library > 0 then
+		table.insert(
+			head_children,
+			ui.row({ key = "lib-head-actions", gap = 8, align = "center" }, {
+				ui.input({
+					key = "library-filter-input",
+					placeholder = "Filter...",
+					value = view.library_text_filter or "",
+					width = 270,
+					onChange = function(val)
+						view.library_text_filter = val or ""
+						rerender.call()
+					end,
+				}),
+				sync_btn,
+			})
+		)
+	else
+		table.insert(head_children, sync_btn)
+	end
 	table.insert(
 		child,
-		ui.row({ key = "lib-head", align = "center", justify = "space_between", radius = theme.radius }, {
-			ui.column({ gap = 4, radius = theme.radius }, {
-				ui.label({ text = "LIBRARY", fontSize = theme.fontHero, fontWeight = "bold", color = "on_surface" }),
-				ui.label({
-					text = #data.library .. " items in your YouTube Music library",
-					fontSize = theme.fontTitle,
-					color = "on_surface_variant",
-				}),
-			}),
-			ui.button({
-				key = "btn-sync-lib-head",
-				glyph = is_refreshing_lib and "loader" or "refresh",
-				variant = "secondary",
-				controlSize = "md",
-				tooltip = is_refreshing_lib and "Refreshing library..." or "Refresh library",
-				onClick = is_refreshing_lib and nil or function()
-					request("refresh_library", {})
-				end,
-			}),
-		})
+		ui.row({ key = "lib-head", align = "center", justify = "space_between", radius = theme.radius }, head_children)
 	)
 
 	table.insert(child, ui.row({ key = "spacer-lib-1", height = 8, borderWidth = 0, radius = theme.radius }))
@@ -44,6 +65,7 @@ local function build_library()
 		{ id = "playlists", label = "Playlists" },
 		{ id = "albums", label = "Albums" },
 		{ id = "artists", label = "Artists" },
+		{ id = "podcasts", label = "Podcasts" },
 	}
 
 	local chip_elems = {}
@@ -52,27 +74,15 @@ local function build_library()
 		local key = "lib-chip-" .. c.id
 		table.insert(
 			chip_elems,
-			ui.row({
+			ui.button({
 				key = key,
-				align = "center",
-				justify = "center",
-				paddingV = 6,
-				paddingH = 16,
-				borderWidth = 1,
-				border = active and "primary" or "outline/0.4",
-				fill = active and "primary" or "surface_variant/0.2",
+				text = c.label,
+				variant = active and "primary" or "outline",
+				controlSize = "sm",
 				onClick = function()
 					view.library_filter = c.id
 					rerender.call()
 				end,
-				radius = theme.radius,
-			}, {
-				ui.label({
-					text = c.label,
-					fontSize = theme.fontTitle,
-					fontWeight = active and "bold" or "medium",
-					color = active and "on_primary" or "on_surface",
-				}),
 			})
 		)
 	end
@@ -80,6 +90,7 @@ local function build_library()
 	table.insert(child, ui.row({ key = "spacer-lib-2", height = 14, borderWidth = 0, radius = theme.radius }))
 
 	-- Filter items
+	local query = view.library_text_filter or ""
 	local items = {}
 	local liked_item = nil
 	for _, item in ipairs(data.library) do
@@ -88,7 +99,12 @@ local function build_library()
 		local title_lower = (item.title or ""):lower()
 		local is_artist = (iid:sub(1, 2) == "UC" or sub_lower:find("artist", 1, true))
 		local is_album = (iid:sub(1, 5) == "MPREb" or sub_lower:find("album", 1, true))
-		local is_playlist = not is_artist and not is_album
+		-- YouTube Music's own Library keeps podcast shows out of the Playlists
+		-- tab — they live under Podcasts, and every library row says which it is
+		-- ("Podcast • Pushkin Industries & Financial Times" vs "Playlist • …").
+		-- Without this every show the account follows listed as a playlist.
+		local is_podcast = (sub_lower:sub(1, 7) == "podcast")
+		local is_playlist = not is_artist and not is_album and not is_podcast
 
 		local matches = false
 		if filter == "all" then
@@ -99,6 +115,12 @@ local function build_library()
 			matches = true
 		elseif filter == "artists" and is_artist then
 			matches = true
+		elseif filter == "podcasts" and is_podcast then
+			matches = true
+		end
+
+		if matches then
+			matches = common.fuzzy_match(query, (item.title or "") .. " " .. (item.subtitle or ""))
 		end
 
 		if matches then
@@ -133,9 +155,15 @@ local function build_library()
 			local is_hovered = (view.hover_key.card == key)
 
 			local icon_name = "playlist"
-			if iid:sub(1, 2) == "UC" then icon_name = "user" end
-			if iid:sub(1, 5) == "MPREb" then icon_name = "disc" end
-			if item.title:lower():find("liked", 1, true) then icon_name = "heart" end
+			if iid:sub(1, 2) == "UC" then
+				icon_name = "user"
+			end
+			if iid:sub(1, 5) == "MPREb" then
+				icon_name = "disc"
+			end
+			if item.title:lower():find("liked", 1, true) then
+				icon_name = "heart"
+			end
 
 			local thumb_path = item.thumb_path or item.thumbnail_url
 
@@ -153,14 +181,27 @@ local function build_library()
 					onClick = function()
 						view.hover_key.card = nil
 						if iid:sub(1, 2) == "UC" then
-							state.open_artist({ id = iid, title = item.title, name = item.title, thumbnail_url = item.thumbnail_url, thumb_path = item.thumb_path })
+							state.open_artist({
+								id = iid,
+								title = item.title,
+								name = item.title,
+								thumbnail_url = item.thumbnail_url,
+								thumb_path = item.thumb_path,
+							})
 						else
 							state.open_playlist(item)
 						end
 					end,
 					onHover = "onCardHover",
 				}, {
-					common.thumb_or_placeholder(thumb_path, 200, icon_name, 38, "primary", is_hovered and "primary/0.2" or "surface_variant/0.6"),
+					common.thumb_or_placeholder(
+						thumb_path,
+						200,
+						icon_name,
+						38,
+						"primary",
+						is_hovered and "primary/0.2" or "surface_container/0.6"
+					),
 					ui.column({ gap = 2, flexGrow = 1, radius = theme.radius }, {
 						ui.label({
 							text = item.title,

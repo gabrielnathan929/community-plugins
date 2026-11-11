@@ -2,6 +2,10 @@
 -- Vikunja backend: today/overdue counts, task list, add, complete, postpone.
 
 local STATE_KEY = "vk_snapshot"
+-- Entries get a small scalar push reliably; the snapshot itself is big enough
+-- that the host does not deliver every update of it. A revision counter tells
+-- the panel when to re-read the snapshot.
+local REV_KEY = "vk_rev"
 local COMMAND_KEY = "vk_command"
 local RESULT_KEY = "vk_action_result"
 
@@ -34,6 +38,7 @@ local snapshot = {
   projectOpen = nil,
   projectTasks = {},
   projectBuckets = {},
+  showDone = false,
   projectLoading = false,
   -- Buckets of the project the add row targets (kanban projects only).
   addProject = nil,
@@ -51,6 +56,13 @@ local refreshAgain = false
 local refreshStartedAt = 0
 local projectStartedAt = 0
 local actionBusy = false
+-- Wall-clock stamp of the last busy transition: a dropped HTTP callback would
+-- otherwise leave every action rejected as busy forever.
+local actionBusySince = 0
+local function setBusy(value)
+  actionBusy = value and true or false
+  actionBusySince = actionBusy and os.time() or 0
+end
 local dataSignature = ""
 local prevOverdue = {}
 
@@ -309,7 +321,21 @@ local function decodeBody(res)
     return nil, "forbidden (403) — the API token lacks permissions"
   end
   if res.status and res.status >= 400 then
-    return nil, "HTTP " .. tostring(res.status)
+    -- Vikunja explains 4xx answers in the body ("Bucket does not exist …");
+    -- losing that text would leave the panel with a bare status code.
+    local detail = ""
+    if type(res.body) == "string" and res.body ~= "" then
+      local decoded = noctalia.json.decode(res.body)
+      if type(decoded) == "table" then
+        for _, field in ipairs({ "message", "detail" }) do
+          if type(decoded[field]) == "string" and decoded[field] ~= "" then
+            detail = ": " .. decoded[field]
+            break
+          end
+        end
+      end
+    end
+    return nil, "HTTP " .. tostring(res.status) .. detail
   end
   local body = res.body
   if type(body) ~= "string" or body == "" then
@@ -365,6 +391,7 @@ local function publishSnapshot()
   snapshot.host = hostLabel()
   snapshot.base = baseUrl()
   noctalia.state.set(STATE_KEY, snapshot)
+  noctalia.state.set(REV_KEY, snapshot.revision)
 end
 
 -- `projectId` is the project being browsed: view payloads leave project_id at 0.
@@ -392,6 +419,7 @@ local function parseTask(raw, titles, projectId)
     dueDate = due and dateLabel(due) or "",
     bucket = due and dueBucket(due) or "none",
     bucketId = tonumber(raw.bucket_id),
+    done = raw.done == true,
     url = taskUrl(id),
   }
 end
@@ -796,12 +824,15 @@ end
 -- A kanban view is what makes the bucket grouping possible; otherwise use the
 -- first view (list/table/gantt all return the same tasks).
 local function pickView(views)
+  -- A project can hold more than one kanban view; the one the board is used with
+  -- is the last, not the first (they are ordered by position).
+  local kanban = nil
   for _, view in ipairs(views) do
     if view.kind == "kanban" then
-      return view
+      kanban = view
     end
   end
-  return views[1]
+  return kanban or views[#views] or views[1]
 end
 
 local function fetchBuckets(projectId, viewId, onDone)
@@ -876,13 +907,16 @@ local projectGeneration = 0
 -- v2 serves a kanban view's buckets with their tasks in one request ("List a
 -- kanban view's buckets with their tasks"). The flat v1 endpoint does not carry
 -- bucket assignments, which is why this path uses v2.
-local function fetchBucketTasks(projectId, viewId, onDone)
-  local path = `projects/{projectId}/views/{viewId}/buckets/tasks?` .. query({
-    { "filter", "done = false" },
+local function fetchBucketTasks(projectId, viewId, includeDone, onDone)
+  local args = {
     { "filter_timezone", timezone() },
     { "per_page", PAGE_SIZE },
     { "page", 1 },
-  })
+  }
+  if not includeDone then
+    table.insert(args, 1, { "filter", "done = false" })
+  end
+  local path = `projects/{projectId}/views/{viewId}/buckets/tasks?` .. query(args)
   apiRequestV2("GET", path, nil, function(res)
     local data, err = decodeBody(res)
     if data == nil then
@@ -981,11 +1015,6 @@ openProject = function(command)
     actionResult(command, false, noctalia.tr("result.failed", { error = "unknown project" }))
     return
   end
-  -- A slow or stuck load must never swallow the next click: after a few
-  -- seconds the click wins and the load starts over.
-  if snapshot.projectLoading and projectStartedAt > 0 and (nowSec() - projectStartedAt) < 5 then
-    return
-  end
   snapshot.projectLoading = true
   projectStartedAt = nowSec()
   projectGeneration += 1
@@ -1017,7 +1046,7 @@ openProject = function(command)
   local cached = (snapshot.viewCache or {})[projectId]
   if cached ~= nil then
     if cached.kind == "kanban" and cached.id ~= 0 then
-      fetchBucketTasks(projectId, cached.id, function(items, err)
+      fetchBucketTasks(projectId, cached.id, snapshot.showDone, function(items, err)
         if generation ~= projectGeneration then
           return
         end
@@ -1050,7 +1079,7 @@ openProject = function(command)
       return
     end
     -- Kanban: v2 returns the buckets together with their tasks in one request.
-    fetchBucketTasks(projectId, view.id, function(items, err)
+    fetchBucketTasks(projectId, view.id, snapshot.showDone, function(items, err)
       if generation ~= projectGeneration then
         return
       end
@@ -1093,6 +1122,24 @@ local function loadBuckets(command)
 end
 
 -- Move a task into another bucket of the open project's kanban view.
+-- Buckets can be deleted in the web UI while the panel still holds their ids:
+-- drop the cached view and let the next click work on fresh data.
+local function dropBucketCache(projectId)
+  local cache = snapshot.viewCache or {}
+  if projectId ~= nil then
+    cache[projectId] = nil
+  end
+  snapshot.viewCache = cache
+  snapshot.addBuckets = {}
+  snapshot.addProject = nil
+end
+
+-- Vikunja answers a dead bucket reference with "Bucket does not exist [BucketID: …]".
+local function staleBucketError(text)
+  local message = lower(text)
+  return message:find("bucket", 1, true) ~= nil and message:find("exist", 1, true) ~= nil
+end
+
 local function moveTask(command)
   local taskId = tonumber(command.taskId or command.id)
   local bucketId = tonumber(command.bucketId)
@@ -1106,14 +1153,14 @@ local function moveTask(command)
     return
   end
   local task = findTask(taskId)
-  actionBusy = true
+  setBusy(true)
   publishSnapshot()
   apiRequestV2("PUT", `projects/{open.id}/views/{open.viewId}/buckets/{bucketId}/tasks`, {
     task_id = taskId,
   }, function(res)
     local data, err = decodeBody(res)
     local ok = data ~= nil and (res.status == nil or res.status < 400)
-    actionBusy = false
+    setBusy(false)
     if ok then
       local bucketTitle = tostring(bucketId)
       for _, bucket in ipairs(snapshot.projectBuckets or {}) do
@@ -1128,6 +1175,12 @@ local function moveTask(command)
       actionResult(command, true, message)
       notifyOk(message)
       publishSnapshot()
+      openProject({ action = "open_project", projectId = open.id, requestId = command.requestId })
+    elseif staleBucketError(tostring(err) .. " " .. tostring(res and res.body)) then
+      local message = noctalia.tr("result.bucket_gone")
+      dropBucketCache(open.id)
+      actionResult(command, false, message)
+      notifyErr(message)
       openProject({ action = "open_project", projectId = open.id, requestId = command.requestId })
     else
       actionResult(command, false, noctalia.tr("result.failed", { error = err or "move failed" }))
@@ -1151,7 +1204,7 @@ end
 -- actions
 
 local function finishAction(command, ok, message)
-  actionBusy = false
+  setBusy(false)
   actionResult(command, ok, message)
   if ok then
     notifyOk(message)
@@ -1168,6 +1221,18 @@ local function finishAction(command, ok, message)
   end
 end
 
+local function toggleDone(command)
+  snapshot.showDone = not snapshot.showDone
+  local open = snapshot.projectOpen
+  if open ~= nil then
+    openProject({ action = "open_project", projectId = open.id, requestId = command and command.requestId })
+  else
+    publishSnapshot()
+    actionResult(command or { action = "toggle_done" }, true,
+      noctalia.tr(snapshot.showDone and "result.done_shown" or "result.done_hidden"))
+  end
+end
+
 local function completeTask(command)
   if actionBusy then
     actionResult(command, false, noctalia.tr("result.busy"))
@@ -1178,13 +1243,15 @@ local function completeTask(command)
     actionResult(command, false, noctalia.tr("result.failed", { error = "unknown task" }))
     return
   end
-  actionBusy = true
+  setBusy(true)
   publishSnapshot()
-  apiRequest("POST", "tasks/" .. task.id, { done = true }, function(res)
+  -- The button is the only way back from done, so it toggles.
+  local target = task.done ~= true
+  apiRequest("POST", "tasks/" .. task.id, { done = target }, function(res)
     local data, err = decodeBody(res)
     local ok = data ~= nil and (res.status == nil or res.status < 400)
     if ok then
-      finishAction(command, true, noctalia.tr("result.completed", { title = task.title }))
+      finishAction(command, true, noctalia.tr(target and "result.completed" or "result.reopened", { title = task.title }))
     else
       finishAction(command, false, noctalia.tr("result.failed", { error = err or "complete failed" }))
     end
@@ -1204,7 +1271,7 @@ local function postponeTask(command)
   local days = tonumber(command.days) or 1
   days = math.max(1, math.min(365, math.floor(days)))
 
-  actionBusy = true
+  setBusy(true)
   publishSnapshot()
   -- Re-read the task so a due date changed elsewhere is respected.
   apiRequest("GET", "tasks/" .. task.id, nil, function(res)
@@ -1273,7 +1340,7 @@ local function addTask(command)
   if bucketId ~= nil and bucketId > 0 then
     body.bucket_id = bucketId
   end
-  actionBusy = true
+  setBusy(true)
   publishSnapshot()
   body.due_date = dueStringFor(target)
   apiRequest("PUT", `projects/{project.id}/tasks`, body, function(res)
@@ -1281,6 +1348,10 @@ local function addTask(command)
     local ok = data ~= nil and (res.status == nil or res.status < 400)
     if ok then
       finishAction(command, true, noctalia.tr("result.added", { title = title }))
+    elseif bucketId ~= nil and staleBucketError(tostring(err) .. " " .. tostring(res and res.body)) then
+      local message = noctalia.tr("result.bucket_gone")
+      dropBucketCache(project.id)
+      finishAction(command, false, message)
     else
       finishAction(command, false, noctalia.tr("result.failed", { error = err or "add failed" }))
     end
@@ -1320,7 +1391,9 @@ local function executeAction(command)
     closeProject(command)
     return
   end
-  if command.action == "load_buckets" then
+  if command.action == "toggle_done" then
+    toggleDone(command)
+  elseif command.action == "load_buckets" then
     loadBuckets(command)
     return
   end
@@ -1361,6 +1434,10 @@ noctalia.setUpdateInterval(refreshIntervalMs())
 refreshAll()
 
 function update()
+  if actionBusy and actionBusySince > 0 and os.time() - actionBusySince > 12 then
+    setBusy(false)
+    publishSnapshot()
+  end
   refreshAll()
 end
 

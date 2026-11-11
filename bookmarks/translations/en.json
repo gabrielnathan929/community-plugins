@@ -117,6 +117,7 @@
       "label": "Tooltip"
     }
   },
+  "settings_tooltip": "Settings",
   "show_controls_tooltip": "Show reorder/edit/delete controls",
   "title": "Bookmarks"
 }

@@ -83,7 +83,7 @@ end
 -- Themed input — avoids repeating 5 style props on every ui.input call
 local function mkInput(p)
 	p.controlSize = "sm"; p.paddingH = 4; p.fill = "surface/0.8"
-	p.border = "outline/0.3"; p.borderWidth = 1; p.radius = 8
+	p.border = "outline_variant/0.3"; p.borderWidth = 1; p.radius = 8
 	return ui.input(p)
 end
 
@@ -172,7 +172,7 @@ local function deviceSidebar(visibleOrder, devices, sel)
 		}))
 	end
 	return ui.column({ key = "sidebar", gap = 6, flexGrow = 1,
-		fill = "surface_variant/0.8", radius = 12, padding = 6 }, kids)
+		fill = "surface_container/0.8", radius = 12, padding = 6 }, kids)
 end
 
 -- ── Tools card ──────────────────────────────────────────────────────────────
@@ -192,7 +192,7 @@ local function toolsCard(d)
 			onClick = function() if not notifyIfDisconnected(d) then sendCmd({ op = def[5], device = d.id }) end end,
 		}))
 	end
-	return ui.row({ key = "tools-card", gap = 2, paddingH = 5, paddingV = 5, radius = 12, fill = "surface_variant/0.8", align = "center", justify = "space_between" }, btns)
+	return ui.row({ key = "tools-card", gap = 2, paddingH = 5, paddingV = 5, radius = 12, fill = "surface_container/0.8", align = "center", justify = "space_between" }, btns)
 end
 
 -- ── Dashboard card ──────────────────────────────────────────────────────────
@@ -229,7 +229,7 @@ local function dashboardCard(d)
 		pfp = ui.image({ path = imgPath, width = 54, height = 54, radius = 10, fit = "cover", opacity = 0.45 })
 	else -- offline without image, or fully disconnected
 		pfp = ui.column({ width = 54, height = 54, radius = 10, fill = "surface/0.8",
-			border = "outline/0.2", borderWidth = 1, align = "center", justify = "center" },
+			border = "outline_variant/0.2", borderWidth = 1, align = "center", justify = "center" },
 			{ ui.glyph({ name = offline and glyph or "device-mobile-off",
 				size = offline and 30 or 26, color = "on_surface_variant" }) })
 	end
@@ -259,7 +259,6 @@ local function dashboardCard(d)
 		battEl = ui.row({ gap = 3, align = "center" }, {
 			ui.glyph({ name = common.batteryGlyph(charge, charging), size = 16, color = cc }),
 			ui.label({ text = hasCharge and (tostring(charge) .. "%") or "--", fontSize = 13, fontWeight = "medium", color = cc }),
-			charging or nil,
 		})
 	end
 
@@ -291,7 +290,7 @@ local function dashboardCard(d)
 	if statusRow then table.insert(infoKids, statusRow) end
 
 	return ui.column({ key = "dashboard", gap = 4, paddingV = 6, paddingH = 10, radius = 12,
-		fill = "surface_variant/0.8" }, {
+		fill = "surface_container/0.8" }, {
 		ui.row({ gap = 6, align = "center" }, {
 			pfp, ui.column({ gap = 2, flexGrow = 1, minWidth = 0, justify = "center" }, infoKids),
 		}),
@@ -467,7 +466,7 @@ local function castCard(d)
 	}))
 
 	return ui.column({ key = "cast-card", gap = 6, padding = 8, radius = 12,
-		fill = "surface_variant/0.8" }, children)
+		fill = "surface_container/0.8" }, children)
 end
 
 -- ── Messages card ───────────────────────────────────────────────────────────
@@ -499,12 +498,15 @@ local function messagesCard(d)
 					ui.button({ glyph = "x", variant = "ghost", controlSize = "sm", glyphSize = 10, onClick = function() favNameEdits[num] = nil; render() end }),
 				}))
 			else
+				-- 名字可能为空：用密集列表构建子节点，避免 nil 空洞（Noctalia 逐下标读取 children）
+				local nameKids = {}
+				if fav.name ~= "" then
+					table.insert(nameKids, ui.label({ text = fav.name, fontSize = 11, fontWeight = "bold", color = "on_surface", maxLines = 1 }))
+				end
+				table.insert(nameKids, ui.label({ text = num, fontSize = fav.name ~= "" and 10 or 11, color = fav.name ~= "" and "on_surface_variant" or "on_surface", maxLines = 1 }))
 				table.insert(favItems, ui.row({ key = "fav-" .. num, gap = 6, paddingH = 6, paddingV = 3, radius = 6, fill = "surface", align = "center", onClick = sel }, {
 					ui.glyph({ name = "star-filled", size = 11, color = "primary" }),
-					ui.column({ gap = 0, flexGrow = 1, minWidth = 0, onClick = sel }, {
-						fav.name ~= "" and ui.label({ text = fav.name, fontSize = 11, fontWeight = "bold", color = "on_surface", maxLines = 1 }) or nil,
-						ui.label({ text = num, fontSize = fav.name ~= "" and 10 or 11, color = fav.name ~= "" and "on_surface_variant" or "on_surface", maxLines = 1 }),
-					}),
+					ui.column({ gap = 0, flexGrow = 1, minWidth = 0, onClick = sel }, nameKids),
 					ui.button({ key = "fav-ren-" .. num, glyph = "pencil", variant = "ghost", controlSize = "sm", glyphSize = 10, tooltip = tr("panel.edit_name", "Edit contact name"), onClick = function() favNameEdits[num] = true; render() end }),
 					ui.button({ key = "fav-rm-" .. num, glyph = "x", variant = "ghost", controlSize = "sm", glyphSize = 10, onClick = function()
 						for i, f in ipairs(smsFavorites) do if f.number == num then table.remove(smsFavorites, i); break end end
@@ -528,33 +530,38 @@ local function messagesCard(d)
 		end
 	end
 
-	return ui.column({ key = "msgs", gap = 4, padding = 8, radius = 12, fill = "surface_variant/0.8", flexGrow = 1 }, {
-		ui.row({ gap = 4, align = "center" }, {
-			mkInput({ key = "sms-dest-" .. d.id .. "-" .. tostring(smsDestRev), placeholder = tr("panel.phone_placeholder", "1234567890"),
-				tooltip = tr("panel.sms_dest", "Phone number"), value = draft.dest, flexGrow = 1, onChange = function(v) draftFor(d.id).dest = v; render() end,
-				onSubmit = function(v)
-					local q = (v or draft.dest or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
-					for _, f in ipairs(smsFavorites) do
-						if q ~= "" and f.name ~= "" and (f.name:lower() == q or f.name:lower():find(q, 1, true)) then
-							draftFor(d.id).dest = f.number; smsDestRev = smsDestRev + 1; render(); return
-						end
+	-- dest 为空时不留 nil 空洞：密集列表按需插入清除按钮（Noctalia 逐下标读取 children）
+	local destKids = {
+		mkInput({ key = "sms-dest-" .. d.id .. "-" .. tostring(smsDestRev), placeholder = tr("panel.phone_placeholder", "1234567890"),
+			tooltip = tr("panel.sms_dest", "Phone number"), value = draft.dest, flexGrow = 1, onChange = function(v) draftFor(d.id).dest = v; render() end,
+			onSubmit = function(v)
+				local q = (v or draft.dest or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
+				for _, f in ipairs(smsFavorites) do
+					if q ~= "" and f.name ~= "" and (f.name:lower() == q or f.name:lower():find(q, 1, true)) then
+						draftFor(d.id).dest = f.number; smsDestRev = smsDestRev + 1; render(); return
 					end
-				end }),
-			draft.dest ~= "" and ui.button({ key = "sms-clear", glyph = "x", variant = "ghost", controlSize = "sm", glyphSize = 12,
-				tooltip = tr("panel.clear", "Clear"), onClick = function() draftFor(d.id).dest = ""; smsDestRev = smsDestRev + 1; render() end }) or nil,
-			ui.button({ key = "fav-btn", glyph = isFav and "star-filled" or "star", variant = isFav and "secondary" or "ghost", controlSize = "sm", glyphSize = 14,
-				tooltip = tr("panel.fav_add_tooltip", "Favorite this number"), onClick = function()
-					local dest = draft.dest:gsub("^%s+", ""):gsub("%s+$", "")
-					if dest == "" then return end
-					for i, f in ipairs(smsFavorites) do
-						if f.number == dest or (f.name ~= "" and f.name:lower() == dest:lower()) then
-							table.remove(smsFavorites, i); persistence.saveFavorites(smsFavorites); render(); return
-						end
-					end
-					table.insert(smsFavorites, { number = dest, name = "" })
-					favNameEdits[dest] = true; persistence.saveFavorites(smsFavorites); render()
-				end }),
-		}),
+				end
+			end }),
+	}
+	if draft.dest ~= "" then
+		table.insert(destKids, ui.button({ key = "sms-clear", glyph = "x", variant = "ghost", controlSize = "sm", glyphSize = 12,
+			tooltip = tr("panel.clear", "Clear"), onClick = function() draftFor(d.id).dest = ""; smsDestRev = smsDestRev + 1; render() end }))
+	end
+	table.insert(destKids, ui.button({ key = "fav-btn", glyph = isFav and "star-filled" or "star", variant = isFav and "secondary" or "ghost", controlSize = "sm", glyphSize = 14,
+		tooltip = tr("panel.fav_add_tooltip", "Favorite this number"), onClick = function()
+			local dest = draft.dest:gsub("^%s+", ""):gsub("%s+$", "")
+			if dest == "" then return end
+			for i, f in ipairs(smsFavorites) do
+				if f.number == dest or (f.name ~= "" and f.name:lower() == dest:lower()) then
+					table.remove(smsFavorites, i); persistence.saveFavorites(smsFavorites); render(); return
+				end
+			end
+			table.insert(smsFavorites, { number = dest, name = "" })
+			favNameEdits[dest] = true; persistence.saveFavorites(smsFavorites); render()
+		end }))
+
+	return ui.column({ key = "msgs", gap = 4, padding = 8, radius = 12, fill = "surface_container/0.8", flexGrow = 1 }, {
+		ui.row({ gap = 4, align = "center" }, destKids),
 		ui.scroll({ key = "fav-scroll", flexGrow = 1, gap = 2 }, #favItems > 0 and favItems or {
 			ui.row({ align = "center", justify = "center", paddingV = 16, flexGrow = 1 }, {
 				ui.label({ text = query ~= "" and tr("panel.no_matches", "No matching contacts") or tr("panel.fav_empty", "No favorite numbers yet"),
@@ -583,7 +590,7 @@ local function mediaBar(d)
 
 	if not connected or not title or title == "" then
 		return ui.row({ key = "media-bar", gap = 6, paddingV = 6, paddingH = 6, radius = 12,
-			fill = "surface_variant/0.8", align = "center" }, {
+			fill = "surface_container/0.8", align = "center" }, {
 			ui.glyph({ name = "music-off", size = 18, color = "on_surface_variant" }),
 			ui.label({ text = tr("panel.no_media", "No media playing"), fontSize = 12,
 				color = "on_surface_variant", flexGrow = 1 }),
@@ -633,7 +640,7 @@ local function mediaBar(d)
 		ui.row({ gap = 8, align = "center" }, { transport, seekEl }),
 	}))
 	return ui.row({ key = "media-bar", gap = 15, paddingV = 8, paddingH = 8, radius = 12,
-		fill = "surface_variant/0.8", align = "center" }, kids)
+		fill = "surface_container/0.8", align = "center" }, kids)
 end
 
 -- ── Main render ─────────────────────────────────────────────────────────────

@@ -46,7 +46,7 @@ local function profileRow(profile)
     gap = 8,
     padding = 8,
     align = "center",
-    fill = "surface_variant/0.5",
+    fill = "surface_container/0.5",
     radius = 8,
     tooltip = tr("panel.open-tooltip", { name = profile.name }),
     onClick = function()
@@ -166,7 +166,15 @@ function render()
     return
   end
 
-  local profiles, err = shared.profiles(noctalia.getConfig("profiles_path"))
+  local profiles, err, isLoading = shared.profiles(noctalia.getConfig("profiles_path"), render)
+  if profiles == nil and isLoading then
+    -- first load still reading the files: render() runs again when it lands
+    panel.render(ui.column({ gap = 10, padding = 14, height = PANEL_HEIGHT }, {
+      header(0),
+      ui.label({ text = tr("panel.loading"), fontSize = 12, color = "on_surface/0.7" }),
+    }))
+    return
+  end
   if profiles == nil then
     panel.render(ui.column({ gap = 10, padding = 14, height = PANEL_HEIGHT }, {
       header(0),

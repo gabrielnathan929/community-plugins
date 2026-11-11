@@ -4,29 +4,32 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import logging
+import math
 import os
 import re
+import select
 import shutil
+import signal
 import subprocess
 import sys
 import threading
 import time
+import tomllib
 import xml.etree.ElementTree as ET
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 from urllib.parse import quote, urlparse
-
-import requests
-import socketio
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
-from lyrics_overlay_cfg import restore_word_spacing  # noqa: E402
+from lyrics_overlay_cfg import display_track_id, restore_word_spacing  # noqa: E402
 
 log = logging.getLogger("cider-bridge")
 
@@ -35,7 +38,7 @@ TrackCallback = Callable[["TrackEvent"], None]
 _STATE_DIR = Path.home() / ".cache" / "noctalia-cider"
 _EVENT_SEQ = 0
 _CIDER_APP_IDS = {"cider", "org.xcider.cider", "Cider"}
-_WINDOW_POLL_SEC = 0.35
+_WINDOW_POLL_SEC = 0.1
 
 
 @dataclass
@@ -62,7 +65,8 @@ class TrackEvent:
     skip_position: bool = False
 
 
-_EMIT_LOCK = threading.Lock()
+# Ownership changes and the sidecar publication they protect share this lock.
+_EMIT_LOCK = threading.RLock()
 
 
 def _atomic_write(path: Path, text: str) -> None:
@@ -86,11 +90,12 @@ _POS_ANCHOR_WALL = 0.0
 _POS_PLAYING = False
 _POS_DURATION_MS = 0
 # Clock hygiene for position.json (overlay extrapolates from these anchors).
-# Untrusted poll/state samples: reject tiny forward spikes, ignore mild behind
-# snaps. Trusted time events (real Cider playbackTimeDidChange / new track)
-# always re-anchor so scrubbing seeks track immediately.
+# Ignore small backwards corrections from both live ticks and polls: consumers
+# may already have crossed a lyric boundary by extrapolating the last anchor.
+# Live ticks still accept forward seeks; new tracks explicitly reset the clock.
 _AHEAD_REJECT_MS = 400
-_STALE_REWIND_MIN_MS = 350
+# ponytail: backwards scrubs <1.5s resemble jitter; use explicit seek events if
+# Cider exposes them to distinguish scrubs from routine time ticks.
 _SEEK_ACCEPT_MS = 1500
 
 
@@ -125,16 +130,14 @@ def _write_position(
     duration_ms: int = 0,
     *,
     trust: bool = False,
+    reset: bool = False,
+    provider_rewind: bool = False,
 ) -> None:
     """Write last-known Cider anchor. HUD/Luau extrapolate between ticks.
 
-    Never store wall-clock-extrapolated values here — that double-counts with
-    consumers.
-
-    trust=True  — live playbackTimeDidChange / new track: always re-anchor so
-                  scrubbing seeks move lyrics immediately.
-    trust=False — poll/state snapshots: reject spurious ahead spikes, ignore
-                  mild behind snaps, but accept |delta| >= SEEK as a seek.
+    trust=True accepts live forward seeks; polls reject forward spikes.
+    Routine ticks ignore small backwards jitter. provider_rewind accepts a
+    reported native seek; reset=True lets a new track start at any position.
     """
     global _POS_ANCHOR_MS, _POS_ANCHOR_WALL, _POS_PLAYING, _POS_DURATION_MS
     position_ms = max(0, int(position_ms))
@@ -142,31 +145,35 @@ def _write_position(
     duration_ms = max(0, int(duration_ms or 0))
 
     with _POS_LOCK:
-        if duration_ms:
+        now = time.time()
+        if duration_ms or reset:
             _POS_DURATION_MS = duration_ms
         dur = _POS_DURATION_MS
-        if (not trust) and _POS_ANCHOR_WALL > 0 and _POS_PLAYING:
-            elapsed = max(0, int((time.time() - _POS_ANCHOR_WALL) * 1000))
+        if not reset and _POS_ANCHOR_WALL > 0 and (_POS_PLAYING or playing):
+            elapsed = max(0, int((now - _POS_ANCHOR_WALL) * 1000)) if _POS_PLAYING else 0
             est = _POS_ANCHOR_MS + elapsed
             if dur > 0:
                 est = min(est, dur)
             delta = position_ms - est  # +ahead of clock, -behind
             if playing:
-                if delta > _AHEAD_REJECT_MS:
+                if not trust and delta > _AHEAD_REJECT_MS:
                     # Spurious forward spike from a poll. Forward seeks arrive on
                     # trusted playbackTimeDidChange ticks instead.
                     return
                 rewind = -delta
-                if _STALE_REWIND_MIN_MS <= rewind < _SEEK_ACCEPT_MS:
-                    # Mild behind from a stale poll — don't scrub.
-                    return
+                if 0 < rewind < _SEEK_ACCEPT_MS and not provider_rewind:
+                    # Keep the original anchor/t so jitter cannot reverse lyrics.
+                    if _POS_PLAYING:
+                        return
+                    # Resume from the frozen position even if its tick is stale.
+                    position_ms = est
                 # rewind >= SEEK_ACCEPT: treat as scrub/seek backward.
-            elif (-delta) >= _STALE_REWIND_MIN_MS:
+            elif delta < 0 and (not trust or (-delta < _SEEK_ACCEPT_MS and not provider_rewind)):
                 # Pause with a stale timestamp: freeze at the live estimate.
                 position_ms = est
 
         _POS_ANCHOR_MS = position_ms
-        _POS_ANCHOR_WALL = time.time()
+        _POS_ANCHOR_WALL = now
         _POS_PLAYING = playing
 
     payload = {
@@ -174,7 +181,7 @@ def _write_position(
         "playing": playing,
         "duration_ms": dur,
         "remaining_ms": max(0, dur - position_ms) if dur else 0,
-        "t": time.time(),
+        "t": now,
     }
     _atomic_write(_STATE_DIR / "position.json", json.dumps(payload, ensure_ascii=False))
 
@@ -222,6 +229,14 @@ def _write_loft(payload: dict[str, Any]) -> None:
     _atomic_write(_loft_path(), json.dumps(payload, ensure_ascii=False))
 
 
+def _remember_workspace() -> bool:
+    try:
+        config = json.loads((_STATE_DIR / "lyrics_osd_cfg.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return isinstance(config, dict) and config.get("remember_workspace") is True
+
+
 def _clear_loft() -> None:
     try:
         _loft_path().unlink(missing_ok=True)
@@ -244,7 +259,7 @@ def _umbriel_in_scratchpad(window: dict[str, Any] | None) -> bool:
 
 
 def _umbriel_peer_output(windows: list[dict[str, Any]]) -> str:
-    focused = next((w for w in windows if w.get("focused") is True), None)
+    focused = next((w for w in windows if w.get("active", w.get("focused")) is True), None)
     if focused is not None:
         output = _umbriel_output_from_workspace(focused.get("workspace"))
         if output:
@@ -291,6 +306,34 @@ def _umbriel_windows_json() -> list[dict[str, Any]] | None:
     return [row for row in data if isinstance(row, dict)]
 
 
+def _umbriel_workspaces_json() -> list[dict[str, Any]] | None:
+    try:
+        raw = subprocess.check_output(
+            ["umbriel", "workspaces", "--json"], stderr=subprocess.DEVNULL, timeout=1.5,
+        )
+        data = json.loads(raw)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        log.debug("umbriel workspaces --json failed: %s", exc)
+        return None
+    return [row for row in data if isinstance(row, dict)] if isinstance(data, list) else None
+
+
+def _select_restore_workspace(workspace: str, send: Callable[[str], bool]) -> bool:
+    output, _, name = workspace.partition(":")
+    if not output or not name:
+        return False
+    rows = _umbriel_workspaces_json()
+    target = next((row for row in rows or [] if row.get("id") == workspace), None)
+    if target is None:
+        return False
+    if target.get("focused") is True:
+        return True
+    if not send(f"workspace-switch:{name}/{output}"):
+        return False
+    return any(row.get("id") == workspace and row.get("focused") is True
+               for row in _umbriel_workspaces_json() or [])
+
+
 def _parse_umbriel_windows(text: str) -> list[tuple[bool, str, str]]:
     """TSV listing leftover for tests; live probe uses JSON."""
     rows: list[tuple[bool, str, str]] = []
@@ -308,39 +351,68 @@ def _parse_umbriel_windows(text: str) -> list[tuple[bool, str, str]]:
 
 
 def _umbriel_on_screen(cider: dict[str, Any], windows: list[dict[str, Any]]) -> bool:
-    if cider.get("focused") is True:
+    if cider.get("active", cider.get("focused")) is True:
         return True
     cider_ws = str(cider.get("workspace") or "")
-    focused = next((w for w in windows if w.get("focused") is True), None)
+    focused = next((w for w in windows if w.get("active", w.get("focused")) is True), None)
     if focused is None:
-        return bool(cider.get("active") is True)
+        return False
     return cider_ws != "" and cider_ws == str(focused.get("workspace") or "")
+
+
+def _select_cider_window(
+    windows: list[dict[str, Any]], cached_id: str = ""
+) -> dict[str, Any] | None:
+    cider_windows = [
+        w for w in windows if _is_cider_window(w.get("app_id"), w.get("title"))
+    ]
+    return min(
+        cider_windows,
+        key=lambda w: (
+            str(w.get("title") or "").strip().lower() != "cider - mini player",
+            w.get("active", w.get("focused")) is not True,
+            str(w.get("id") or "") != cached_id,
+            str(w.get("title") or "").strip().lower() != "cider",
+            str(w.get("id") or ""),
+        ),
+        default=None,
+    )
 
 
 def apply_umbriel_listing(windows: list[dict[str, Any]] | None) -> dict[str, Any] | None:
     """Map an Umbriel window list (or query failure) onto window.json + loft latch."""
     loft = _read_loft()
     cached_id = str(loft.get("id") or "")
+    if isinstance(loft.get("x11"), dict):
+        current = _x11_cached_owner_current(loft["x11"])
+        info = _x11_owned_window(loft["x11"], str(loft.get("title") or ""))
+        if current is False:
+            _clear_loft()
+            loft, cached_id = {}, ""
+        elif loft.get("remapping") or info is None or _x11_main_mapped(info) is not True:
+            return _lofted_window_payload(loft)
+        else:
+            _clear_loft()  # A manual map releases ownership of the hidden window.
+            loft, cached_id = {}, ""
 
     if windows is None:
         if loft.get("lofted") is True and cached_id:
             return _lofted_window_payload(loft)
         return None
 
-    cider = next(
-        (w for w in windows if _is_cider_window(w.get("app_id"), w.get("title"))),
-        None,
-    )
+    cider = _select_cider_window(windows, cached_id)
     if cider is not None:
         wid = str(cider.get("id") or cached_id)
         ws_output = _umbriel_output_from_workspace(cider.get("workspace"))
         lofted = _umbriel_in_scratchpad(cider)
         output = ws_output or str(loft.get("output") or "") or _umbriel_peer_output(windows)
-        _write_loft({"id": wid, "output": output, "lofted": lofted})
-        if lofted:
-            return _lofted_window_payload({"id": wid, "output": output, "lofted": True})
-        focused = cider.get("focused") is True
-        on_screen = _umbriel_on_screen(cider, windows)
+        kept = loft if wid == cached_id else {}
+        _write_loft({**kept, "id": wid, "output": output, "lofted": lofted})
+        cider_windows = [
+            w for w in windows if _is_cider_window(w.get("app_id"), w.get("title"))
+        ]
+        focused = any(w.get("active", w.get("focused")) is True for w in cider_windows)
+        on_screen = any(_umbriel_on_screen(w, windows) for w in cider_windows)
         payload = _empty_window_probe()
         payload["compositor"] = "umbriel"
         payload["present"] = True
@@ -355,8 +427,8 @@ def apply_umbriel_listing(windows: list[dict[str, Any]] | None) -> dict[str, Any
 
     if cached_id:
         output = str(loft.get("output") or "")
-        _write_loft({"id": cached_id, "output": output, "lofted": True})
-        return _lofted_window_payload({"id": cached_id, "output": output, "lofted": True})
+        _write_loft({**loft, "id": cached_id, "output": output, "lofted": True})
+        return _lofted_window_payload(loft)
 
     if not windows:
         return None
@@ -386,6 +458,18 @@ def _umbriel_msg(action: str) -> bool:
         return False
 
 
+def _close_umbriel_watch(watch: subprocess.Popen[bytes]) -> None:
+    if watch.stdout is not None:
+        watch.stdout.close()
+    if watch.poll() is None:
+        watch.terminate()
+    try:
+        watch.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        watch.kill()
+        watch.wait(timeout=1)
+
+
 def _umbriel_action(name: str, output: str) -> str:
     output = (output or "").strip()
     if not output:
@@ -396,7 +480,475 @@ def _umbriel_action(name: str, output: str) -> str:
 def _window_is_focused(windows: list[dict[str, Any]] | None, wid: str) -> bool:
     if not windows or not wid:
         return False
-    return any(str(w.get("id") or "") == wid and w.get("focused") is True for w in windows)
+    return any(
+        str(w.get("id") or "") == wid
+        and w.get("active", w.get("focused")) is True
+        for w in windows
+    )
+
+
+@contextmanager
+def _window_transaction() -> Iterator[None]:
+    """Serialize the polling bridge and one-shot widget/launcher helpers."""
+    _STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with (_STATE_DIR / "window.lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def _focus_umbriel_window(
+    wid: str,
+    send: Callable[[str], bool],
+    list_windows: Callable[[], list[dict[str, Any]] | None],
+    *,
+    attempts: int = 3,
+) -> bool | None:
+    if not send(f"window-focus:{wid}"):
+        return None
+    for attempt in range(attempts):
+        windows = list_windows()
+        if windows is None:
+            return None
+        if _window_is_focused(windows, wid):
+            return True
+        if attempt + 1 < attempts:
+            time.sleep(0.03)
+    return False
+
+
+def _umbriel_fade_seconds() -> float:
+    """Wait for the compositor's fade before reattaching the window to its workspace."""
+    path = Path(os.environ.get("CIDER_UMBRIEL_CONFIG") or (
+        Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "umbriel/config.toml"
+    )).expanduser()
+    animation: dict[str, Any] = {}
+    scratchpad: dict[str, Any] = {}
+    seen: set[Path] = set()
+
+    def read(config: Path) -> None:
+        config = config.resolve()
+        if config in seen:
+            return
+        seen.add(config)
+        with config.open("rb") as file:
+            data = tomllib.load(file)
+        for name in data.get("include", {}).get("files", []):
+            included = Path(name).expanduser()
+            read(included if included.is_absolute() else config.parent / included)
+        section = data.get("animation", {})
+        animation.update({k: v for k, v in section.items() if k != "scratchpad"})
+        scratchpad.update(section.get("scratchpad", {}))
+
+    try:
+        read(path)
+        if animation.get("enabled") is False or scratchpad.get("enabled") is not True:
+            return 0.0
+        duration = 250
+        for value in (animation.get("duration_ms"), scratchpad.get("duration_ms")):
+            if type(value) is int and 1 <= value <= 10000:
+                duration = value
+        return duration / 1000.0
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        log.debug("Umbriel animation config unavailable: %s", exc)
+        return 0.25
+
+
+def _restore_umbriel_window(
+    wid: str,
+    output: str,
+    windows: list[dict[str, Any]],
+    send: Callable[[str], bool],
+    list_windows: Callable[[], list[dict[str, Any]] | None],
+    *,
+    workspace: str = "",
+) -> bool:
+    row = next((w for w in windows if str(w.get("id") or "") == wid), None)
+    if row is None or not output:
+        return False
+    if not _umbriel_in_scratchpad(row):
+        return _focus_umbriel_window(wid, send, list_windows) is True
+    # 0.1.0 always restores to the saved workspace. Select it before revealing
+    # the pad, since moving a scratchpad member to another workspace is inert.
+    if workspace and not _select_restore_workspace(workspace, send):
+        return False
+    # Visibility and activation differ. Focusing a visible but unfocused pad
+    # works; toggling it first would hide it. Hidden pads ignore focus on 0.1.0.
+    # Focus IPC completes synchronously. A hidden pad cannot gain focus until
+    # shown, so retrying this visibility probe only delays the first frame.
+    focused = _focus_umbriel_window(wid, send, list_windows, attempts=1)
+    if focused is None:
+        return False
+    opened_pad = not focused
+    restored = False
+    if opened_pad and not send(_umbriel_action("scratchpad-toggle", output)):
+        return False
+    try:
+        if opened_pad:
+            shown_at = time.monotonic()
+            if not _focus_umbriel_window(wid, send, list_windows):
+                return False
+            time.sleep(max(0.0, _umbriel_fade_seconds() - (time.monotonic() - shown_at)))
+            if not _focus_umbriel_window(wid, send, list_windows):
+                return False
+        restored = send(_umbriel_action("window-restore-from-scratchpad", output))
+        return restored
+    finally:
+        # Undo only the visibility change this operation made, including errors.
+        if opened_pad and (not restored or any(
+            str(w.get("id") or "") != wid and _umbriel_in_scratchpad(w)
+            for w in windows
+        )):
+            send(_umbriel_action("scratchpad-toggle", output))
+
+
+def _read_miniplayer() -> dict[str, Any]:
+    try:
+        state = json.loads((_STATE_DIR / "miniplayer.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def show_cider_window() -> int:
+    """Launcher hook: restore the existing mini/main; 1 lets the launcher start Cider."""
+    windows = _umbriel_windows_json()
+    if windows is None:
+        return 2 if "umbriel" in os.environ.get("XDG_CURRENT_DESKTOP", "").lower() else 1
+    loft = _read_loft()
+    if isinstance(loft.get("x11"), dict):
+        if _x11_cached_owner_current(loft["x11"]) is False:
+            _clear_loft()
+        else:
+            if not _restore_x11_window(loft, windows, _umbriel_msg, _umbriel_windows_json, _loft_path()):
+                return 2
+            _clear_loft()
+            apply_umbriel_listing(_umbriel_windows_json())
+            return 0
+    row = _select_cider_window(windows)
+    if row is None:
+        state = _read_miniplayer()
+        if not isinstance(state.get("main_x11"), dict) or not state.get("restore_main", True):
+            return 1
+        if _x11_owner_current(state) is False:
+            (_STATE_DIR / "miniplayer.json").unlink(missing_ok=True)
+            return 1
+        reconcile_miniplayer(windows)
+        windows = _umbriel_windows_json()
+        row = _select_cider_window(windows or [])
+        if row is None:
+            return 2  # An owned main is still remapping; never launch a duplicate.
+    payload = apply_umbriel_listing(windows)
+    output = str((payload or {}).get("output") or "")
+    loft = _read_loft()
+    if _umbriel_in_scratchpad(row):
+        converted = _hide_x11_window(row, loft)
+        if converted is not None:
+            if not converted or not _restore_x11_window(
+                _read_loft(), windows, _umbriel_msg, _umbriel_windows_json, _loft_path()
+            ):
+                return 2
+            _clear_loft()
+            apply_umbriel_listing(_umbriel_windows_json())
+            return 0
+    return 0 if _restore_umbriel_window(
+        str(row.get("id") or ""), output, windows, _umbriel_msg, _umbriel_windows_json,
+        workspace=str(_read_loft().get("workspace") or ""),
+    ) else 2
+
+
+def _xdotool(*args: str) -> str | None:
+    if not shutil.which("xdotool"):
+        return None
+    try:
+        return subprocess.check_output(
+            ["xdotool", *args], stderr=subprocess.PIPE, timeout=0.6,
+        ).decode("utf-8").strip()
+    except subprocess.CalledProcessError as exc:
+        if args and args[0] == "search" and exc.returncode == 1 and not exc.output and not exc.stderr:
+            return ""
+        log.debug("Cider X11 query/action failed: %s", exc)
+    except (OSError, UnicodeError, subprocess.TimeoutExpired) as exc:
+        log.debug("Cider X11 query/action unavailable: %s", exc)
+    return None
+
+
+def _x11_process_start(pid: int) -> str:
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()[19]
+    except (OSError, IndexError):
+        return ""
+
+
+def _x11_window_info(xid: str, title: str) -> dict[str, Any] | None:
+    if title not in ("Cider", "Cider - Mini Player") or not xid.isdecimal() or int(xid) <= 0:
+        return None
+    raw = _xdotool("getwindowname", xid, "getwindowclassname", xid,
+                   "getwindowpid", xid, "getwindowgeometry", "--shell", xid)
+    if raw is None:
+        return None
+    rows = raw.splitlines()
+    try:
+        if len(rows) != 9 or rows[0] != title or rows[1].lower() != "cider":
+            return None
+        geometry = dict(row.split("=", 1) for row in rows[3:])
+        pid = int(rows[2])
+        start = _x11_process_start(pid) if pid > 0 else ""
+        if not start or int(geometry["WINDOW"]) != int(xid):
+            return None
+        return {"xid": xid, "pid": pid, "start": start,
+                "w": int(geometry["WIDTH"]), "h": int(geometry["HEIGHT"])}
+    except (KeyError, ValueError):
+        return None
+
+
+def _x11_main_info(xid: str) -> dict[str, Any] | None:
+    return _x11_window_info(xid, "Cider")
+
+
+def _x11_main_for_view(main: dict[str, Any]) -> dict[str, Any] | None:
+    if main.get("xwayland") is not True or not all(
+        type(main.get(key)) is int and main[key] > 10 for key in ("w", "h")
+    ):
+        return None
+    ids = _xdotool("search", "--onlyvisible", "--class", "^cider$")
+    matches = [info for xid in (ids or "").split()
+               if (info := _x11_main_info(xid)) is not None
+               and (info["w"], info["h"]) == (main["w"], main["h"])]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _x11_window_for_view(window: dict[str, Any]) -> dict[str, Any] | None:
+    title = str(window.get("title") or "")
+    if title == "Cider":
+        return _x11_main_for_view(window)
+    if title != "Cider - Mini Player" or window.get("xwayland") is not True or not all(
+        type(window.get(key)) is int and window[key] > 10 for key in ("w", "h")
+    ):
+        return None
+    ids = _xdotool("search", "--onlyvisible", "--class", "^cider$")
+    matches = [info for xid in (ids or "").split()
+               if (info := _x11_window_info(xid, title)) is not None
+               and (info["w"], info["h"]) == (window["w"], window["h"])]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _x11_owned_window(cached: Any, title: str) -> dict[str, Any] | None:
+    if not isinstance(cached, dict):
+        return None
+    xid = str(cached.get("xid") or "")
+    info = _x11_main_info(xid) if title == "Cider" else _x11_window_info(xid, title)
+    return info if info is not None and all(
+        info[key] == cached.get(key) for key in ("xid", "pid", "start")
+    ) else None
+
+
+def _x11_owned_main(state: dict[str, Any]) -> dict[str, Any] | None:
+    return _x11_owned_window(state.get("main_x11"), "Cider")
+
+
+def _x11_cached_owner_current(cached: Any) -> bool | None:
+    if not isinstance(cached, dict):
+        return False
+    pid, start, xid = cached.get("pid"), cached.get("start"), str(cached.get("xid") or "")
+    if (type(pid) is not int or pid <= 0 or not isinstance(start, str) or not start.isdecimal()
+            or not xid.isdecimal() or int(xid) <= 0):
+        return False
+    current_start = _x11_process_start(pid)
+    if current_start:
+        if current_start != start:
+            return False
+    else:
+        try:
+            os.kill(pid, 0)  # Existence probe only; do not confuse permission failure with exit.
+        except ProcessLookupError:
+            return False
+        except OSError:
+            pass
+        return None
+    ids = _xdotool("search", "--pid", str(pid))
+    return xid in ids.split() if ids is not None else None
+
+
+def _x11_owner_current(state: dict[str, Any]) -> bool | None:
+    return _x11_cached_owner_current(state.get("main_x11"))
+
+
+def _x11_main_mapped(info: dict[str, Any]) -> bool | None:
+    ids = _xdotool("search", "--onlyvisible", "--pid", str(info["pid"]))
+    return info["xid"] in ids.split() if ids is not None else None
+
+
+def _hide_x11_window(row: dict[str, Any], loft: dict[str, Any]) -> bool | None:
+    if _umbriel_in_scratchpad(row) and _remember_workspace() and not loft.get("workspace"):
+        return None  # Only the native scratchpad still knows this legacy destination.
+    info = _x11_window_for_view(row)
+    if info is None:
+        return None
+    hidden = {**loft, "x11": info, "title": row["title"], "lofted": True}
+    if not _umbriel_in_scratchpad(row):
+        hidden["workspace"] = row.get("workspace") or ""
+        if type(row.get("floating")) is bool:
+            hidden["floating"] = row["floating"]
+    _write_loft(hidden)
+    if _x11_owned_window(info, row["title"]) is None:
+        _write_loft(loft)
+        return False
+    if _xdotool("windowunmap", info["xid"], "getwindowpid", info["xid"]) is None:
+        if _x11_main_mapped(info) is True:
+            _write_loft(loft)
+        return False
+    return True
+
+
+def _restore_x11_window(
+    state: dict[str, Any], windows: list[dict[str, Any]],
+    send: Callable[[str], bool], list_windows: Callable[[], list[dict[str, Any]] | None],
+    path: Path,
+) -> bool:
+    title = str(state.get("title") or "Cider")
+    info = _x11_owned_window(state.get("x11", state.get("main_x11")), title)
+    if info is None:
+        return False
+    mapped = _x11_main_mapped(info)
+    if mapped is None:
+        return False
+    if mapped and not state.get("remapping"):
+        return True  # A manual restore releases ownership without moving/focusing it.
+    if not mapped:
+        workspace = str(state.get("workspace") or "")
+        if _remember_workspace() and workspace and not _select_restore_workspace(workspace, send):
+            return False
+        state["remapping"] = True
+        _atomic_write(path, json.dumps(state))
+        if _xdotool("windowmap", info["xid"], "getwindowpid", info["xid"]) is None:
+            return False
+        windows = list_windows() or []
+    candidates = [row for row in windows if _is_cider_window(row.get("app_id"), row.get("title"))
+                  and row.get("title") == title and row.get("xwayland") is True]
+    if len(candidates) != 1:
+        return False
+    main = candidates[0]
+    visible = _x11_window_for_view(main)
+    if visible is None or any(visible[key] != info[key] for key in ("xid", "pid", "start")):
+        return False
+    wid = str(main.get("id") or "")
+    if not wid or not _focus_umbriel_window(wid, send, list_windows):
+        return False
+    floating = state.get("floating")
+    if type(floating) is bool and main.get("floating") is not floating:
+        if not send("window-toggle-floating"):
+            return False
+    return _focus_umbriel_window(wid, send, list_windows) is True
+
+
+def reconcile_miniplayer(
+    windows: list[dict[str, Any]] | None,
+    msg: Callable[[str], bool] | None = None,
+    listing: Callable[[], list[dict[str, Any]] | None] | None = None,
+) -> None:
+    """Hide the main only for a new mini, and restore only the main we hid."""
+    send = msg or _umbriel_msg
+    list_windows = listing or _umbriel_windows_json
+    path = _STATE_DIR / "miniplayer.json"
+    state = _read_miniplayer()
+    if windows is None:
+        return
+    loft = _read_loft()
+    if loft.get("remapping") and isinstance(loft.get("x11"), dict):
+        if _restore_x11_window(loft, windows, send, list_windows, _loft_path()):
+            _clear_loft()
+            windows = list_windows() or windows
+    mini = next((w for w in windows if _is_cider_window(w.get("app_id"), w.get("title"))
+                 and str(w.get("title") or "").lower() == "cider - mini player"), None)
+    if mini is None:
+        loft = _read_loft()
+        if loft.get("title") == "Cider - Mini Player" and isinstance(loft.get("x11"), dict):
+            if _x11_cached_owner_current(loft["x11"]) is not False:
+                return  # A user-hidden mini still owns its hidden main.
+            _clear_loft()
+        if isinstance(state.get("main_x11"), dict):
+            if (not state.get("restore_main", True) or _x11_owner_current(state) is False
+                    or _restore_x11_window(state, windows, send, list_windows, path)):
+                path.unlink(missing_ok=True)
+            return
+        main_id = str(state.get("main_id") or "")
+        main = next((w for w in windows if str(w.get("id") or "") == main_id
+                     and _is_cider_window(w.get("app_id"), w.get("title"))), None)
+        if main is not None and _umbriel_in_scratchpad(main) and state.get("restore_main", True):
+            if not _restore_umbriel_window(main_id, str(state.get("output") or ""),
+                                           windows, send, list_windows,
+                                           workspace=str(state.get("workspace") or "")):
+                return
+        path.unlink(missing_ok=True)
+        return
+    mini_id = str(mini.get("id") or "")
+    if not mini_id:
+        return
+    if state.get("mini_id") != mini_id and mini.get("floating") is False:
+        if not _focus_umbriel_window(mini_id, send, list_windows) or not send("window-toggle-floating"):
+            return
+    main = next((w for w in windows if _is_cider_window(w.get("app_id"), w.get("title"))
+                 and str(w.get("title") or "").lower() == "cider"), None)
+    previous = state
+    if isinstance(previous.get("main_x11"), dict):
+        state = {**previous, "mini_id": mini_id}
+        info = _x11_owned_main(state)
+        if info is not None and _x11_main_mapped(info) is True:
+            if state.get("remapping") and state.get("restore_main", True):
+                if _xdotool("windowunmap", info["xid"], "getwindowpid", info["xid"]) is None:
+                    return
+                state.pop("remapping", None)
+            else:
+                state["restore_main"] = False
+        if state != previous:
+            _atomic_write(path, json.dumps(state))
+        return
+    state = {"mini_id": mini_id}
+    if main is not None and str(main.get("id") or "") == previous.get("main_id"):
+        state.update(main_id=previous["main_id"], output=previous.get("output", ""),
+                     restore_main=previous.get("restore_main", True) and _umbriel_in_scratchpad(main))
+        state.update({key: previous[key] for key in ("workspace", "floating") if key in previous})
+    owns_pad = main is not None and _umbriel_in_scratchpad(main) and state.get("restore_main") is True
+    needs_hide = main is not None and not _umbriel_in_scratchpad(main) and (
+        previous.get("main_id") != main.get("id") or previous.get("mini_id") != mini_id
+    )
+    if main is not None and (needs_hide or owns_pad):
+        info = _x11_main_for_view(main)
+        if info is not None:
+            state.update(main_id=str(main.get("id") or ""), main_x11=info, restore_main=True)
+            if not owns_pad:
+                state["workspace"] = main.get("workspace") or ""
+                if type(main.get("floating")) is bool:
+                    state["floating"] = main["floating"]
+            # Journal ownership before unmapping; an interrupted helper must
+            # never leave a hidden main with no way to return it.
+            _atomic_write(path, json.dumps(state))
+            if _x11_owned_main(state) is None:
+                _atomic_write(path, json.dumps(previous))
+                return
+            # The same-connection property read acknowledges XUnmap before a
+            # later event probe can mistake its pending state for a manual map.
+            if _xdotool("windowunmap", info["xid"], "getwindowpid", info["xid"]) is None:
+                if _x11_main_mapped(info) is True:
+                    _atomic_write(path, json.dumps(previous))
+                return
+            if mini.get("floating") is not False and not _window_is_focused(windows, mini_id):
+                _focus_umbriel_window(mini_id, send, list_windows)
+            return
+    if needs_hide:
+        main_id = str(main.get("id") or "")
+        output = _umbriel_output_from_workspace(main.get("workspace"))
+        if not main_id or not output or not _focus_umbriel_window(main_id, send, list_windows):
+            return
+        if not send(_umbriel_action("window-move-to-scratchpad", output)):
+            return
+        state.update(main_id=main_id, output=output, restore_main=True)
+        state["workspace"] = main.get("workspace") or ""
+        if type(main.get("floating")) is bool:
+            state["floating"] = main["floating"]
+        _focus_umbriel_window(mini_id, send, list_windows)
+    if state != previous:
+        _atomic_write(path, json.dumps(state))
 
 
 def toggle_loft(
@@ -416,35 +968,33 @@ def toggle_loft(
     if not wid or not output:
         return 0
     was_lofted = loft.get("lofted") is True
-    cider_now = next(
-        (w for w in (windows or []) if str(w.get("id") or "") == wid),
-        None,
-    )
-    pad_visible = (
-        was_lofted
-        and cider_now is not None
-        and cider_now.get("focused") is True
-    )
+    if isinstance(loft.get("x11"), dict):
+        if _restore_x11_window(loft, windows or [], send, list_windows, _loft_path()):
+            _clear_loft()
+            apply_umbriel_listing(list_windows())
+        return 0
+    row = next((w for w in windows or [] if str(w.get("id") or "") == wid), None)
+    hidden = _hide_x11_window(row, loft) if row is not None else None
+    if hidden is not None:
+        if was_lofted and hidden and _restore_x11_window(
+            _read_loft(), windows or [], send, list_windows, _loft_path()
+        ):
+            _clear_loft()
+            apply_umbriel_listing(list_windows())
+        return 0
     if was_lofted:
-        # Hidden pad members ignore window-focus. Restore needs the pad shown first.
-        # https://docs.noctalia.dev/umbriel/scratchpads/
-        if not pad_visible:
-            show = _umbriel_action("scratchpad-toggle", output)
-            if show:
-                send(show)
-        send(f"window-focus:{wid}")
-        restore = _umbriel_action("window-restore-from-scratchpad", output)
-        if restore:
-            send(restore)
+        _restore_umbriel_window(wid, output, windows or [], send, list_windows,
+                                workspace=str(loft.get("workspace") or ""))
         return 0
-    if not send(f"window-focus:{wid}"):
-        return 0
-    if _window_is_focused(list_windows(), wid) is False:
+    if not _focus_umbriel_window(wid, send, list_windows):
         return 0
     pad = _umbriel_action("window-move-to-scratchpad", output)
     if not pad:
         return 0
-    send(pad)
+    hidden = {**loft, "workspace": (row or {}).get("workspace") or ""}
+    _write_loft(hidden)
+    if not send(pad):
+        _write_loft(loft)
     return 0
 
 
@@ -643,7 +1193,7 @@ def _wipe_playback_sidecars() -> None:
             pass
 
 
-def emit(event: TrackEvent) -> None:
+def emit(event: TrackEvent, *, provider_rewind: bool = False) -> None:
     global _EVENT_SEQ
     payload = asdict(event)
     if payload.get("lyrics_lines") is None:
@@ -652,17 +1202,30 @@ def emit(event: TrackEvent) -> None:
     body = json.dumps(payload, ensure_ascii=False)
     with _EMIT_LOCK:
         _STATE_DIR.mkdir(parents=True, exist_ok=True)
+        if event.type == "lyrics":
+            # Validate against the same snapshot lock used by track changes.
+            try:
+                current = json.loads((_STATE_DIR / "state.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return
+            if any(payload.get(field) != current.get(field)
+                   for field in ("title", "artist", "album", "duration_ms", "catalog_id")):
+                return
         # Continuous snapshot for progress polling
         if event.type in {"track", "time", "state", "art"}:
+            if event.type == "track":
+                # Also covers distinct catalog tracks with the same title/artist.
+                (_STATE_DIR / "lyrics.json").unlink(missing_ok=True)
             _atomic_write(_STATE_DIR / "state.json", body)
             if event.type in {"track", "time", "state"} and not skip_position:
                 _write_position(
                     int(event.position_ms or 0),
                     str(event.playback_state or "") == "playing",
                     int(event.duration_ms or 0),
-                    # Live time ticks + new tracks are authoritative (seeks).
-                    # Snapshot/state polls stay filtered against sprint/scrub noise.
+                    # Live time ticks accept seeks; tracks bypass jitter filtering.
                     trust=event.type in {"time", "track"},
+                    reset=event.type == "track",
+                    provider_rewind=provider_rewind,
                 )
         elif event.type == "clear":
             _wipe_playback_sidecars()
@@ -827,6 +1390,7 @@ def resolve_catalog_id(attrs: dict[str, Any], play_params: dict[str, Any] | None
     candidates: list[Any] = [
         play_params.get("catalogId"),
         play_params.get("id"),
+        attrs.get("catalog_id"),
         attrs.get("catalogId"),
         attrs.get("songId"),
         attrs.get("id"),
@@ -868,7 +1432,9 @@ def _span_timings(el: Any) -> tuple[list[dict[str, Any]], list[int]]:
     leaves: list[tuple[Any, int, int | None]] = []
     for child, begin, end in candidates:
         has_timed_child = False
-        for sub in child:
+        for sub in child.iter():
+            if sub is child:
+                continue
             if sub.tag.rsplit("}", 1)[-1] != "span":
                 continue
             if _parse_ttml_time(sub.attrib.get("begin")) is not None:
@@ -885,7 +1451,7 @@ def _span_timings(el: Any) -> tuple[list[dict[str, Any]], list[int]]:
         if not text:
             continue
         if end is None or end < begin:
-            end = begin + max(120, len(text) * 80)
+            end = begin
         words.append({"text": text, "start": begin, "end": end})
         span_dur = max(0, end - begin)
         n = max(1, len(text))
@@ -1001,6 +1567,10 @@ class CiderBridge:
         cache_dir: Path,
         poll_interval_sec: float,
     ) -> None:
+        # One-shot window controls need only stdlib and compositor IPC.
+        import requests
+        import socketio
+
         self.base_url = base_url.rstrip("/")
         self.apptoken = apptoken.strip()
         self.cache_dir = cache_dir
@@ -1014,11 +1584,17 @@ class CiderBridge:
             self._session.headers["apitoken"] = self.apptoken
         self._sio = socketio.Client(reconnection=True, reconnection_delay=2)
         self._stop = threading.Event()
+        self._window_thread: threading.Thread | None = None
+        self._window_watch: subprocess.Popen[bytes] | None = None
         self._art_lock = threading.Lock()
+        self._snapshot_lock = threading.Lock()
         self._track_key = ""
         self._lyrics_key = ""
         self._last: dict[str, Any] = {}
         self._api_fail_streak = 0
+        self._provider_clock_active = False
+        self._provider_clock_sample: tuple[int, str] | None = None
+        self._provider_clock_generation = 0
         self._register()
 
     def _register(self) -> None:
@@ -1036,13 +1612,16 @@ class CiderBridge:
 
         @self._sio.event
         def disconnect() -> None:
-            # Cider quit / API down — wipe now-playing so the bar chip goes idle.
-            self._track_key = ""
-            self._lyrics_key = ""
-            self._last = {}
-            _clear_loft()
-            emit(TrackEvent(type="clear"))
-            emit(TrackEvent(type="status", message="disconnected"))
+            with _EMIT_LOCK:
+                # A socket outage must not erase a healthy native snapshot.
+                if not getattr(self, "_provider_clock_active", False):
+                    self._track_key = ""
+                    self._lyrics_key = ""
+                    self._last = {}
+                    self._provider_clock_sample = None
+                    _clear_loft()
+                    emit(TrackEvent(type="clear"))
+                emit(TrackEvent(type="status", message="disconnected"))
 
     def start(self) -> None:
         # Drop leftovers from a previous session until a live snapshot arrives.
@@ -1051,12 +1630,17 @@ class CiderBridge:
         threading.Thread(target=self._run_sio, name="cider-sio", daemon=True).start()
         if self.poll_interval_sec > 0:
             threading.Thread(target=self._poll_loop, name="cider-poll", daemon=True).start()
-        threading.Thread(target=self._window_loop, name="cider-window", daemon=True).start()
+        self._window_thread = threading.Thread(target=self._window_loop, name="cider-window", daemon=True)
+        self._window_thread.start()
         while not self._stop.is_set():
             self._stop.wait(1)
 
     def stop(self) -> None:
         self._stop.set()
+        if self._window_watch is not None:
+            _close_umbriel_watch(self._window_watch)
+        if self._window_thread is not None and self._window_thread.is_alive():
+            self._window_thread.join(timeout=2)
         try:
             self._sio.disconnect()
         except Exception:
@@ -1064,18 +1648,55 @@ class CiderBridge:
 
     def _window_loop(self) -> None:
         last_body = ""
-        while not self._stop.is_set():
-            try:
-                payload = probe_cider_window()
-                # Unlist while the session is alive is loft (KTD1). Chip hide
-                # waits for socket/API death, not a missing window row.
-                body = json.dumps(payload, ensure_ascii=False)
-                if body != last_body:
-                    _write_window(payload)
-                    last_body = body
-            except Exception as exc:
-                log.debug("window probe failed: %s", exc)
-            self._stop.wait(_WINDOW_POLL_SEC)
+        watch: subprocess.Popen[bytes] | None = None
+        watch_retry_at = 0.0
+        try:
+            while not self._stop.is_set():
+                if watch is None and time.monotonic() >= watch_retry_at:
+                    watch_retry_at = time.monotonic() + 5.0
+                    if shutil.which("umbriel"):
+                        try:
+                            watch = subprocess.Popen(
+                                ["umbriel", "subscribe", "windows,workspaces"],
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            )
+                            self._window_watch = watch
+                        except OSError as exc:
+                            log.debug("Umbriel window subscription unavailable: %s", exc)
+                try:
+                    with _window_transaction():
+                        reconcile_miniplayer(_umbriel_windows_json())
+                        payload = probe_cider_window()
+                    # Unlist while the session is alive is loft (KTD1). Chip hide
+                    # waits for socket/API death, not a missing window row.
+                    body = json.dumps(payload, ensure_ascii=False)
+                    if body != last_body:
+                        _write_window(payload)
+                        last_body = body
+                except Exception as exc:
+                    log.debug("window probe failed: %s", exc)
+                if self._stop.is_set():
+                    break
+                if watch is not None and watch.stdout is not None:
+                    try:
+                        # Native events wake reconciliation immediately. Drain
+                        # each burst once; re-query under the transaction lock.
+                        if select.select([watch.stdout], [], [], 1.0)[0]:
+                            if not os.read(watch.stdout.fileno(), 65536):
+                                _close_umbriel_watch(watch)
+                                watch = None
+                                self._window_watch = None
+                    except (OSError, ValueError) as exc:
+                        log.debug("Umbriel window subscription ended: %s", exc)
+                        _close_umbriel_watch(watch)
+                        watch = None
+                        self._window_watch = None
+                if watch is None:
+                    self._stop.wait(_WINDOW_POLL_SEC)
+        finally:
+            if watch is not None:
+                _close_umbriel_watch(watch)
+            self._window_watch = None
 
     def _run_sio(self) -> None:
         while not self._stop.is_set():
@@ -1092,11 +1713,14 @@ class CiderBridge:
             except Exception as exc:
                 # Wipe durable snapshots — otherwise Luau rehydrates a stale
                 # "playing" track from state.json and fires ghost notifications.
-                self._track_key = ""
-                self._lyrics_key = ""
-                self._last = {}
-                emit(TrackEvent(type="clear"))
-                emit(TrackEvent(type="status", message=f"connect_failed:{exc}"))
+                with _EMIT_LOCK:
+                    if not getattr(self, "_provider_clock_active", False):
+                        self._track_key = ""
+                        self._lyrics_key = ""
+                        self._last = {}
+                        self._provider_clock_sample = None
+                        emit(TrackEvent(type="clear"))
+                    emit(TrackEvent(type="status", message=f"connect_failed:{exc}"))
                 self._stop.wait(5)
 
     def _poll_loop(self) -> None:
@@ -1106,31 +1730,97 @@ class CiderBridge:
                 self.refresh_snapshot()
 
     def refresh_snapshot(self) -> None:
+        # Connect and the poll loop can both request a snapshot. Never let an
+        # older response finish after a newer one and resemble a native rewind.
+        if not self._snapshot_lock.acquire(blocking=False):
+            return
         try:
             resp = self._session.get(
-                f"{self.base_url}/api/v1/playback/now-playing",
-                timeout=5,
+                f"{self.base_url}/api/v2/playback",
+                timeout=1,
             )
+            legacy = resp.status_code in {403, 404}
+            if legacy:
+                with _EMIT_LOCK:
+                    self._provider_clock_active = False
+                resp = self._session.get(
+                    f"{self.base_url}/api/v1/playback/now-playing",
+                    timeout=5,
+                )
             if resp.status_code in {404, 502, 503, 504}:
-                self._note_api_dead(f"http_{resp.status_code}")
+                with _EMIT_LOCK:
+                    self._provider_clock_active = False
+                    self._note_api_dead(f"http_{resp.status_code}")
                 return
             if resp.status_code != 200:
+                with _EMIT_LOCK:
+                    self._provider_clock_active = False
                 return
-            self._api_fail_streak = 0
-            info = (resp.json().get("info") or resp.json().get("data") or {})
-            if not info:
-                # Empty payload with a live API usually means nothing loaded.
-                if self._last:
-                    self._track_key = ""
-                    self._lyrics_key = ""
-                    self._last = {}
-                    emit(TrackEvent(type="clear"))
-                return
-            # Never mark poll snapshots as "track" — that re-fires OSD and races lyrics events.
-            self._emit_from_attrs(info, reason="snapshot")
+            payload = resp.json()
+            if not isinstance(payload, dict):
+                raise ValueError("invalid snapshot payload")
+            reason = "snapshot"
+            if legacy:
+                if "info" not in payload and "data" not in payload:
+                    raise ValueError("missing legacy playback")
+                info = payload.get("info") or payload.get("data") or {}
+                if not isinstance(info, dict):
+                    raise ValueError("invalid legacy playback")
+            else:
+                snapshot = payload.get("data")
+                if not isinstance(snapshot, dict) or "nowPlaying" not in snapshot:
+                    raise ValueError("missing provider playback")
+                state = snapshot.get("state")
+                if not isinstance(state, str) or state not in {"playing", "paused", "stopped"}:
+                    raise ValueError("invalid provider playback state")
+                timing = snapshot.get("time")
+                if not isinstance(timing, dict):
+                    raise ValueError("missing provider clock")
+                current = timing.get("currentTime")
+                duration = timing.get("duration")
+                if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0
+                       for v in (current,) + ((duration,) if duration is not None else ())):
+                    raise ValueError("invalid provider clock")
+                info = snapshot["nowPlaying"]
+                if info is not None:
+                    if not isinstance(info, dict) or not any(info.get(k) for k in ("name", "title", "artistName", "artist")):
+                        raise ValueError("invalid provider track")
+                    # v2 reads the reactive provider clock, updated immediately
+                    # on seek; v1 attributes lag behind engine time events.
+                    info = dict(info, currentPlaybackTime=current, _playback_state=state)
+                    if duration is not None:
+                        info["durationInMillis"] = int(duration * 1000)
+                    reason = "clock"
+            with _EMIT_LOCK:
+                active = not legacy and getattr(self, "poll_interval_sec", 0.0) > 0
+                if active and not getattr(self, "_provider_clock_active", False):
+                    self._provider_clock_generation = getattr(self, "_provider_clock_generation", 0) + 1
+                self._provider_clock_active = active
+                self._api_fail_streak = 0
+                if not info:
+                    self._provider_clock_sample = None
+                    # Empty payload with a live API usually means nothing loaded.
+                    if self._last:
+                        self._track_key = ""
+                        self._lyrics_key = ""
+                        self._last = {}
+                        emit(TrackEvent(type="clear"))
+                    return
+                if not legacy:
+                    self._emit_from_attrs(info, reason=reason)
+                    return
+            self._emit_from_attrs(info, reason=reason)
+        except (TypeError, ValueError) as exc:
+            with _EMIT_LOCK:
+                self._provider_clock_active = False
+            log.debug("malformed snapshot: %s", exc)
         except Exception as exc:
+            with _EMIT_LOCK:
+                self._provider_clock_active = False
+                self._note_api_dead(str(exc))
             log.debug("snapshot failed: %s", exc)
-            self._note_api_dead(str(exc))
+        finally:
+            self._snapshot_lock.release()
 
     def _note_api_dead(self, reason: str) -> None:
         self._api_fail_streak = getattr(self, "_api_fail_streak", 0) + 1
@@ -1148,59 +1838,65 @@ class CiderBridge:
         emit(TrackEvent(type="status", message=f"api_dead:{reason}"))
 
     def _handle_event(self, event_type: str, data: Any) -> None:
-        if event_type == "playbackStatus.nowPlayingItemDidChange":
-            if isinstance(data, dict):
-                self._emit_from_attrs(data, reason="track")
-            return
-        if event_type == "playbackStatus.playbackStateDidChange":
-            state_payload = data if isinstance(data, dict) else {}
-            state = str(state_payload.get("state", self._last.get("playback_state", "stopped"))).lower()
-            attrs = state_payload.get("attributes") or self._last
-            merged = dict(attrs) if isinstance(attrs, dict) else dict(self._last)
-            merged["_playback_state"] = state
-            self._emit_from_attrs(merged, reason="state")
-            return
-        if event_type == "playbackStatus.playbackTimeDidChange":
-            time_payload = data if isinstance(data, dict) else {}
-            current = float(time_payload.get("currentPlaybackTime", 0))
-            duration = float(time_payload.get("currentPlaybackDuration", 0))
-            playing = bool(time_payload.get("isPlaying"))
-            position_ms = int(current * 1000)
-            duration_ms = int(duration * 1000) or int(self._last.get("duration_ms", 0))
-            playback_state = "playing" if playing else "paused"
-            # Keep _last in sync — state/snapshot without a timestamp must not
-            # re-anchor the karaoke clock to a track-start leftover.
-            if self._last:
-                self._last["position_ms"] = position_ms
-                self._last["duration_ms"] = duration_ms
-                self._last["playback_state"] = playback_state
-            event = TrackEvent(
-                type="time",
-                title=str(self._last.get("title", "")),
-                artist=str(self._last.get("artist", "")),
-                album=str(self._last.get("album", "")),
-                artwork_path=str(self._last.get("artwork_path", "")),
-                position_ms=position_ms,
-                duration_ms=duration_ms,
-                playback_state=playback_state,
-            )
-            emit(event)
-            return
+        # Cider can emit a fresh engine timestamp with the pre-seek position
+        # while its provider clock already holds the requested seek target.
+        with _EMIT_LOCK:
+            if getattr(self, "_provider_clock_active", False):
+                return
+            generation = getattr(self, "_provider_clock_generation", 0)
+            if event_type == "playbackStatus.nowPlayingItemDidChange":
+                if not isinstance(data, dict):
+                    return
+                attrs, reason = data, "track"
+            elif event_type == "playbackStatus.playbackStateDidChange":
+                state_payload = data if isinstance(data, dict) else {}
+                state = str(state_payload.get("state", self._last.get("playback_state", "stopped"))).lower()
+                source = state_payload.get("attributes") or self._last
+                attrs = dict(source) if isinstance(source, dict) else dict(self._last)
+                attrs["_playback_state"] = state
+                reason = "state"
+            elif event_type == "playbackStatus.playbackTimeDidChange":
+                self._provider_clock_sample = None
+                time_payload = data if isinstance(data, dict) else {}
+                current = float(time_payload.get("currentPlaybackTime", 0))
+                duration = float(time_payload.get("currentPlaybackDuration", 0))
+                playing = bool(time_payload.get("isPlaying"))
+                position_ms = int(current * 1000)
+                duration_ms = int(duration * 1000) or int(self._last.get("duration_ms", 0))
+                playback_state = "playing" if playing else "paused"
+                # Keep metadata timestamps synchronized with the socket clock.
+                if self._last:
+                    self._last["position_ms"] = position_ms
+                    self._last["duration_ms"] = duration_ms
+                    self._last["playback_state"] = playback_state
+                event = TrackEvent(
+                    type="time",
+                    title=str(self._last.get("title", "")),
+                    artist=str(self._last.get("artist", "")),
+                    album=str(self._last.get("album", "")),
+                    artwork_path=str(self._last.get("artwork_path", "")),
+                    song_id=str(self._last.get("song_id", "")),
+                    catalog_id=str(self._last.get("catalog_id", "")),
+                    position_ms=position_ms,
+                    duration_ms=duration_ms,
+                    playback_state=playback_state,
+                )
+                emit(event)
+                return
+            else:
+                return
+        self._emit_from_attrs(attrs, reason, source_generation=generation)
 
-    def _emit_from_attrs(self, attrs: dict[str, Any], reason: str) -> None:
+    def _emit_from_attrs(self, attrs: dict[str, Any], reason: str, *, source_generation: int | None = None) -> None:
         title = str(attrs.get("name") or attrs.get("title") or "")
         artist = str(attrs.get("artistName") or attrs.get("artist") or "")
         album = str(attrs.get("albumName") or attrs.get("album") or "")
-        if not title and not artist:
-            emit(TrackEvent(type="clear"))
-            self._track_key = ""
-            return
-
         play_params = attrs.get("playParams") if isinstance(attrs.get("playParams"), dict) else {}
         catalog_id = resolve_catalog_id(attrs, play_params)
-        song_id = str(play_params.get("id") or catalog_id or "")
+        song_id = str(play_params.get("id") or attrs.get("song_id") or catalog_id or "")
         isrc = str(attrs.get("isrc") or "")
-        duration_ms = int(attrs.get("durationInMillis") or 0)
+        duration_ms = int(attrs.get("durationInMillis") or attrs.get("duration_ms") or 0)
+        key = display_track_id({"title": title, "artist": artist})
         fresh_position = False
         if attrs.get("currentPlaybackTime") is not None:
             position_ms = int(float(attrs["currentPlaybackTime"]) * 1000)
@@ -1212,71 +1908,114 @@ class CiderBridge:
             # No fresh Cider timestamp — keep the live extrapolated clock in
             # memory, but do not rewrite position.json (that re-anchored `t`
             # and could amplify drift).
-            position_ms = _estimated_position_ms() if self._last else 0
+            position_ms = 0
             fresh_position = False
-
-        artwork = attrs.get("artwork") or {}
+        artwork = attrs.get("artwork") or attrs.get("artwork_url") or {}
         artwork_url = ""
         if isinstance(artwork, dict):
             artwork_url = str(artwork.get("url") or "")
         elif isinstance(artwork, str):
             artwork_url = artwork
         artwork_url = _normalize_artwork_url(artwork_url)
-
         cache_key = catalog_id or song_id or artwork_url
-        artwork_path = self._cache_artwork(artwork_url, cache_key) if artwork_url else ""
-        # Never default to "playing" — launch / queue-load often has a track at rest.
-        raw_state = (
-            attrs.get("_playback_state")
-            or attrs.get("playbackState")
-            or attrs.get("status")
-            or attrs.get("playerState")
-        )
-        if raw_state is not None and str(raw_state).strip() != "":
-            state = str(raw_state).lower()
-        else:
-            state = str(self._last.get("playback_state") or "paused").lower()
-        if state in {"play", "playing", "true", "1"}:
-            state = "playing"
-        elif state in {"pause", "paused", "false", "0"}:
-            state = "paused"
-        elif state in {"stop", "stopped", "idle"}:
-            state = "stopped"
-        # Normalize unknown tokens away from "playing".
-        if state not in {"playing", "paused", "stopped"}:
-            state = "paused"
+        with _EMIT_LOCK:
+            if reason != "clock" and getattr(self, "_provider_clock_active", False):
+                return
+            if source_generation is None:
+                source_generation = getattr(self, "_provider_clock_generation", 0)
+        # Native clock polls must never wait for an artwork download. Socket
+        # fallback may fetch it, then rechecks ownership before publishing.
+        artwork_path = str(attrs.get("artwork_path") or "")
+        if reason != "clock" and artwork_url:
+            artwork_path = self._cache_artwork(artwork_url, cache_key)
+        with _EMIT_LOCK:
+            if reason != "clock" and (
+                getattr(self, "_provider_clock_active", False)
+                or source_generation != getattr(self, "_provider_clock_generation", 0)
+            ):
+                return
+            if not title and not artist:
+                emit(TrackEvent(type="clear"))
+                self._track_key = ""
+                self._provider_clock_sample = None
+                return
+            catalog_changed = bool(catalog_id) and catalog_id != self._last.get("catalog_id")
+            is_new_track = key != self._track_key or (catalog_changed and bool(self._last.get("catalog_id")))
+            artwork_changed = artwork_url != self._last.get("artwork_url")
+            if not is_new_track:
+                catalog_id = catalog_id or str(self._last.get("catalog_id") or "")
+                song_id = song_id or str(self._last.get("song_id") or "")
+                album = album or str(self._last.get("album") or "")
+                duration_ms = duration_ms or int(self._last.get("duration_ms") or 0)
+                if not artwork_changed and not artwork_path:
+                    artwork_path = str(self._last.get("artwork_path") or "")
+            lyrics_changed = (catalog_changed or album != self._last.get("album")
+                              or duration_ms != self._last.get("duration_ms"))
+            cache_key = catalog_id or song_id or artwork_url
+            if not fresh_position:
+                position_ms = 0 if is_new_track else _estimated_position_ms()
+            # Never default to "playing" — queue-load can leave a track at rest.
+            raw_state = (attrs.get("_playback_state") or attrs.get("playbackState")
+                         or attrs.get("status") or attrs.get("playerState"))
+            state = str(raw_state or self._last.get("playback_state") or "paused").lower()
+            if state in {"play", "playing", "true", "1"}:
+                state = "playing"
+            elif state in {"pause", "paused", "false", "0"}:
+                state = "paused"
+            elif state in {"stop", "stopped", "idle"}:
+                state = "stopped"
+            if state not in {"playing", "paused", "stopped"}:
+                state = "paused"
+            event_type = "track" if is_new_track else ("time" if reason == "clock" else "state")
+            # Metadata-only snapshots leave the clock alone, but pause/resume
+            # must freeze/restart it even without a fresh timestamp.
+            skip_position = (not fresh_position) and event_type != "track" and state == self._last.get("playback_state")
+            provider_rewind = False
+            if reason == "clock":
+                previous = getattr(self, "_provider_clock_sample", None)
+                previous_position = previous[0] if previous is not None else _POS_ANCHOR_MS
+                provider_rewind = not is_new_track and (
+                    position_ms < previous_position or
+                    (state == "paused" and previous is not None and previous[1] == "paused"
+                     and position_ms != previous_position)
+                )
+                sample = (position_ms, state)
+                skip_position = not is_new_track and sample == previous
+                if (not is_new_track and not provider_rewind and state == "playing"
+                        and self._last.get("playback_state") == state
+                        and position_ms < _estimated_position_ms()):
+                    skip_position = True
+                self._provider_clock_sample = sample
+            else:
+                self._provider_clock_sample = None
+            event = TrackEvent(
+                type=event_type,
+                title=title,
+                artist=artist,
+                album=album,
+                artwork_path=artwork_path,
+                artwork_url=artwork_url,
+                position_ms=max(0, position_ms),
+                duration_ms=max(0, duration_ms),
+                playback_state=state,
+                song_id=song_id,
+                catalog_id=catalog_id,
+                isrc=isrc,
+                has_lyrics=bool(attrs.get("hasLyrics", attrs.get("has_lyrics"))),
+                has_synced=bool(attrs.get("hasTimeSyncedLyrics", attrs.get("has_synced"))),
+                skip_position=skip_position,
+            )
+            self._last = asdict(event)
+            self._last["playback_state"] = state
+            if is_new_track:
+                self._lyrics_key = ""
+            self._track_key = key
+            if provider_rewind:
+                emit(event, provider_rewind=True)
+            else:
+                emit(event)
 
-        key = f"{catalog_id}|{title}|{artist}|{album}|{duration_ms}"
-        is_new_track = key != self._track_key
-        event_type = "track" if is_new_track else ("state" if reason in {"state", "snapshot"} else "state")
-        if reason == "track" and is_new_track:
-            event_type = "track"
-        elif reason == "track" and not is_new_track:
-            event_type = "state"
-        # New tracks always need a position anchor; metadata-only snapshots do not.
-        skip_position = (not fresh_position) and event_type != "track"
-        event = TrackEvent(
-            type=event_type,
-            title=title,
-            artist=artist,
-            album=album,
-            artwork_path=artwork_path,
-            artwork_url=artwork_url,
-            position_ms=max(0, position_ms),
-            duration_ms=max(0, duration_ms),
-            playback_state=state,
-            song_id=song_id,
-            catalog_id=catalog_id,
-            isrc=isrc,
-            has_lyrics=bool(attrs.get("hasLyrics")),
-            has_synced=bool(attrs.get("hasTimeSyncedLyrics")),
-            skip_position=skip_position,
-        )
-        self._last = asdict(event)
-        self._last["playback_state"] = state
-        emit(event)
-
-        if is_new_track and artwork_url and not artwork_path:
+        if (is_new_track or artwork_changed) and artwork_url and not artwork_path:
             threading.Thread(
                 target=self._retry_artwork,
                 args=(key, artwork_url, cache_key),
@@ -1284,16 +2023,17 @@ class CiderBridge:
                 daemon=True,
             ).start()
 
-        if key != self._track_key:
-            self._track_key = key
+        if is_new_track or lyrics_changed:
             threading.Thread(
                 target=self._fetch_lyrics,
-                args=(event,),
+                args=(event, key),
                 name="cider-lyrics",
                 daemon=True,
             ).start()
 
     def _cache_artwork(self, url: str, cache_key: str = "") -> str:
+        import requests
+
         url = _normalize_artwork_url(url)
         if not url:
             return ""
@@ -1324,55 +2064,58 @@ class CiderBridge:
     def _retry_artwork(self, track_key: str, url: str, cache_key: str) -> None:
         for delay in (0.15, 0.4, 1.0):
             time.sleep(delay)
-            if track_key != self._track_key:
-                return
+            with _EMIT_LOCK:
+                if (track_key != self._track_key or url != self._last.get("artwork_url")
+                        or cache_key != (self._last.get("catalog_id") or self._last.get("song_id") or url)):
+                    return
             path = self._cache_artwork(url, cache_key)
             if not path:
                 continue
-            self._last["artwork_path"] = path
-            self._last["artwork_url"] = url
-            emit(
-                TrackEvent(
-                    type="art",
-                    title=str(self._last.get("title", "")),
-                    artist=str(self._last.get("artist", "")),
-                    album=str(self._last.get("album", "")),
-                    artwork_path=path,
-                    artwork_url=url,
-                    position_ms=int(self._last.get("position_ms", 0)),
-                    duration_ms=int(self._last.get("duration_ms", 0)),
-                    playback_state=str(self._last.get("playback_state", "playing")),
-                    song_id=str(self._last.get("song_id", "")),
-                    catalog_id=str(self._last.get("catalog_id", "")),
+            with _EMIT_LOCK:
+                if (track_key != self._track_key or url != self._last.get("artwork_url")
+                        or cache_key != (self._last.get("catalog_id") or self._last.get("song_id") or url)):
+                    return
+                self._last["artwork_path"] = path
+                self._last["artwork_url"] = url
+                emit(
+                    TrackEvent(
+                        type="art",
+                        title=str(self._last.get("title", "")),
+                        artist=str(self._last.get("artist", "")),
+                        album=str(self._last.get("album", "")),
+                        artwork_path=path,
+                        artwork_url=url,
+                        position_ms=int(self._last.get("position_ms", 0)),
+                        duration_ms=int(self._last.get("duration_ms", 0)),
+                        playback_state=str(self._last.get("playback_state", "playing")),
+                        song_id=str(self._last.get("song_id", "")),
+                        catalog_id=str(self._last.get("catalog_id", "")),
+                    )
                 )
-            )
             return
-    def _fetch_lyrics(self, track: TrackEvent) -> None:
-        if self._lyrics_key == self._track_key:
+    def _fetch_lyrics(self, track: TrackEvent, track_key: str) -> None:
+        lyrics_key = f"{track_key}|{track.album}|{track.duration_ms}|{track.catalog_id}"
+        if self._lyrics_key == lyrics_key:
             return
         lines: list[dict[str, Any]] = []
         lrc = ""
         if track.catalog_id:
             lines, lrc = self._lyrics_amapi(track.catalog_id)
-        synced = bool(lines) and int(lines[0].get("time") or -1) >= 0
+        synced = bool(lines) and int(lines[0].get("time", -1)) >= 0
         # Prefer LRCLIB synced over Apple untimed plain.
         if not synced:
             lr_lines, lr_lrc = self._lyrics_lrclib(track)
-            if lr_lines and int(lr_lines[0].get("time") or -1) >= 0:
+            if lr_lines and int(lr_lines[0].get("time", -1)) >= 0:
                 lines, lrc = lr_lines, lr_lrc
                 synced = True
             elif not lines and lr_lines:
                 lines, lrc = lr_lines, lr_lrc
+        # A slow fetch for the old song/source must not replace current lyrics.
+        if (track_key != self._track_key or track.catalog_id != self._last.get("catalog_id")
+                or track.album != self._last.get("album") or track.duration_ms != self._last.get("duration_ms")):
+            return
         if not lines and not lrc:
-            # Drop stale synced lyrics so the widget does not keep the previous song.
-            lyrics_path = _STATE_DIR / "lyrics.json"
-            try:
-                lyrics_path.unlink(missing_ok=True)
-            except TypeError:
-                if lyrics_path.exists():
-                    lyrics_path.unlink()
-            except Exception:
-                pass
+            # Publishing the empty result clears lyrics under emit's track lock.
             emit(
                 TrackEvent(
                     type="lyrics",
@@ -1390,7 +2133,7 @@ class CiderBridge:
                 )
             )
             return
-        self._lyrics_key = self._track_key
+        self._lyrics_key = lyrics_key
         # Stamp with live clock so first lyrics.json is not stuck at fetch start.
         position_ms = int(self._last.get("position_ms", track.position_ms) or 0)
         duration_ms = int(self._last.get("duration_ms", track.duration_ms) or 0)
@@ -1458,6 +2201,8 @@ class CiderBridge:
         return [], ""
 
     def _lyrics_lrclib(self, track: TrackEvent) -> tuple[list[dict[str, Any]], str]:
+        import requests
+
         params = {
             "track_name": track.title,
             "artist_name": track.artist,
@@ -1527,14 +2272,22 @@ def main() -> int:
         action="store_true",
         help="One-shot Umbriel loft send/restore; do not start the bridge.",
     )
+    parser.add_argument("--show-window", action="store_true",
+                        help="One-shot launcher restore; exit 1 when Cider needs launching.")
     args = parser.parse_args()
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.WARNING))
     global _STATE_DIR
     _STATE_DIR = Path(args.state_dir).expanduser()
-    _STATE_DIR.mkdir(parents=True, exist_ok=True)
 
-    if args.toggle_loft:
-        return toggle_loft()
+    if args.toggle_loft or args.show_window:
+        try:
+            with _window_transaction():
+                return show_cider_window() if args.show_window else toggle_loft()
+        except Exception as exc:
+            log.error("Cider window action failed: %s", exc)
+            return 2
+
+    _STATE_DIR.mkdir(parents=True, exist_ok=True)
 
     if not args.token:
         token_file = _STATE_DIR / "apptoken"
@@ -1555,10 +2308,16 @@ def main() -> int:
                 pass
 
     bridge = CiderBridge(args.base_url, args.token, Path(args.cache_dir), args.poll)
+    previous_term = signal.signal(signal.SIGTERM, lambda _signal, _frame: bridge._stop.set())
     try:
         bridge.start()
     except KeyboardInterrupt:
-        bridge.stop()
+        pass
+    finally:
+        try:
+            bridge.stop()
+        finally:
+            signal.signal(signal.SIGTERM, previous_term)
     return 0
 
 

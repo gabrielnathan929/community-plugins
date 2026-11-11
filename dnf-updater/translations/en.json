@@ -1,6 +1,7 @@
 {
   "actions": {
     "check_now": "Check Now",
+    "clear_search": "Clear",
     "close": "Close",
     "collapse": "Collapse section",
     "deselect_all": "Deselect all",
@@ -8,6 +9,7 @@
     "expand": "Expand section",
     "include_pkg": "Include in update",
     "open_settings": "Settings",
+    "search_placeholder": "Search packages…",
     "select_all": "Select all",
     "update_all": "Update All",
     "update_all_size": "Update All ({count} · {size})",
@@ -15,6 +17,12 @@
     "update_flatpak": "Update Flatpak",
     "update_selected": "Update Selected ({count})",
     "update_selected_size": "Update Selected ({count} · {size})"
+  },
+  "ago": {
+    "days": "{n} d ago",
+    "hours": "{n} h ago",
+    "minutes": "{n} min ago",
+    "now": "just now"
   },
   "notifications": {
     "update_complete_body": "System updates have completed successfully.",
@@ -24,11 +32,15 @@
     "updates_available_body": "{count} pending updates are ready to install.",
     "updates_available_title": "Updates Available"
   },
+  "search": {
+    "no_matches": "No packages match \"{query}\""
+  },
   "sections": {
     "dnf": "DNF · {count} updates",
     "dnf_selected": "DNF · {selected}/{total} updates",
     "flatpak": "Flatpak · {count} updates",
-    "flatpak_selected": "Flatpak · {selected}/{total} updates"
+    "flatpak_selected": "Flatpak · {selected}/{total} updates",
+    "runtime": "Runtime"
   },
   "settings": {
     "check_interval": {
@@ -46,6 +58,10 @@
     "glyph": {
       "description": "Icon glyph to display in the Noctalia bar widget.",
       "label": "Widget Icon"
+    },
+    "include_flatpak_runtimes": {
+      "description": "Include Flatpak runtime and extension updates alongside applications.",
+      "label": "Include Flatpak Runtimes"
     },
     "notify_on_updates": {
       "description": "Send a desktop notification when new pending updates are found.",
@@ -75,7 +91,9 @@
     "flatpak_updating": "Updating Flatpak…",
     "flatpak_waiting": "Flatpak waiting…",
     "last_checked": "Last checked: {time}",
+    "last_update": "last update {time}",
     "never_checked": "Never checked",
+    "reboot_required": "Restart required to complete updates",
     "skipped": "Skipped",
     "updating": "Updating packages…"
   },
@@ -84,7 +102,9 @@
     "dnf": "DNF",
     "download": "Download",
     "flatpak": "Flatpak",
+    "last_checked": "Last Checked",
     "storage": "Storage",
+    "system": "System",
     "total": "Total"
   },
   "title": "DNF Updater",
